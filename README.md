@@ -1,5 +1,7 @@
 # Key to Magpie
 
+简体中文 | [English](./README_EN.md)
+
 Chrome 插件：在 [new-api](https://github.com/QuantumNous/new-api) / [sub2api](https://github.com/Wei-Shaw/sub2api) 的令牌管理页面增加「导入到 magpie」按钮，把你的 API Key 通过 [magpie](https://github.com/yetone/magpie) 官方导入协议（`magpie://import` 链接）一键导入为 provider。
 
 ## 安装
@@ -68,6 +70,11 @@ Chrome 插件：在 [new-api](https://github.com/QuantumNous/new-api) / [sub2api
 - [ ] 高级设置里关闭某个端点（如 gemini），导入后 magpie 中该端点为空
 - [ ] 打开一个只适配部分端点的站点，确认未适配的端点被自动取消勾选并标注「未检测到」
 
+## 友情链接
+
+- [linux.do](https://linux.do) — 新的理想型技术社区
+- [V2EX](https://www.v2ex.com) — 创意工作者们的社区
+
 ## 文件结构
 
 ```
@@ -78,3 +85,7 @@ open.html/js    扩展内导入页：唤起 magpie 协议 + 兜底说明
 popup.html/js   工具栏弹窗：在当前标签页唤起导入面板
 icons/          扩展图标
 ```
+
+## 许可证
+
+[MIT](./LICENSE)
