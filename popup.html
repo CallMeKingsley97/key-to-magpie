@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --fg: #17171c;
+      --muted: #6b6b76;
+      --line: #e6e6eb;
+      --brand: #7c3aed;
+      --brand2: #ec4899;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #17171d;
+        --fg: #f4f4f7;
+        --muted: #a1a1ac;
+        --line: #2a2a33;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      width: 300px;
+      background: var(--bg);
+      color: var(--fg);
+      font: 13px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      padding: 13px 14px 10px;
+    }
+    header img { width: 22px; height: 22px; border-radius: 6px; }
+    header h1 { margin: 0; font-size: 14px; letter-spacing: -.01em; }
+    main { padding: 0 14px 14px; }
+    p { margin: 0 0 10px; color: var(--muted); }
+    button {
+      appearance: none;
+      width: 100%;
+      border: 0;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font: inherit;
+      font-weight: 600;
+      color: #fff;
+      background: linear-gradient(135deg, var(--brand), var(--brand2));
+      cursor: pointer;
+      transition: filter .12s ease, transform .12s ease;
+    }
+    button:hover { filter: brightness(1.06); }
+    button:active { transform: scale(.985); }
+    button:disabled { opacity: .55; cursor: default; }
+    .hint {
+      margin-top: 10px;
+      padding: 9px 11px;
+      border-radius: 9px;
+      background: color-mix(in srgb, var(--fg) 4%, transparent);
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .hint b { color: var(--fg); font-weight: 600; }
+    .status { margin-top: 9px; font-size: 12px; min-height: 16px; }
+    .status.err { color: #dc2626; }
+    .status.ok { color: #16a34a; }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="icons/icon48.png" alt="">
+    <h1>Key to Magpie</h1>
+  </header>
+  <main>
+    <p>把 new-api / sub2api 令牌管理页里的 API Key 一键导入 magpie。</p>
+    <button id="open" type="button">打开导入面板</button>
+    <div class="status" id="status"></div>
+    <div class="hint">
+      <b>使用方法</b>：打开中转站的令牌管理页（如 <code>/token</code>、<code>/keys</code>），
+      页面上会出现「导入到 magpie」按钮；此处点击同样可以唤起。
+      导入链接由本机 magpie 应用确认后才会写入。
+    </div>
+  </main>
+  <script src="popup.js"></script>
+</body>
+</html>

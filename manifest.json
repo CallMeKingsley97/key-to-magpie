@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Key to Magpie",
+  "description": "在 new-api / sub2api 的令牌管理页，把用户的 API Key 一键导入 magpie provider。",
+  "version": "1.0.0",
+  "minimum_chrome_version": "102",
+  "permissions": ["storage"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "*://*/keys*",
+        "*://*/token*",
+        "*://*/api-keys*",
+        "*://*/*/keys*",
+        "*://*/*/token*",
+        "*://*/*/api-keys*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "Key to Magpie",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
