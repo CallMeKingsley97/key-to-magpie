@@ -138,12 +138,42 @@ function setupImport(rawLink, name) {
 
   // magpie 的导入弹窗会抢焦点；页面失焦通常说明已经唤起成功。
   let left = false;
+  /** @type {number|null} 自动关闭定时器；期间再次失焦或点击页面可取消 */
+  let closeTimer = null;
+  const cancelAutoClose = () => {
+    if (closeTimer) {
+      clearTimeout(closeTimer);
+      closeTimer = null;
+    }
+  };
   const markLeft = () => {
     left = true;
+    cancelAutoClose();
   };
   window.addEventListener('blur', markLeft);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) markLeft();
+  });
+
+  // 用户在 magpie 中确认后切回此页时，自动关闭标签页。稍作延迟，
+  // 且期间再次失焦（magpie 窗口又抢走焦点）或点击页面则取消，避免误关。
+  window.addEventListener('focus', () => {
+    if (!left || closeTimer) return;
+    setStatus('正在关闭此页…', 'ok');
+    closeTimer = setTimeout(() => {
+      closeTimer = null;
+      window.close();
+      // 若 close() 被浏览器拒绝（页面仍存活），给出手动关闭提示。
+      setTimeout(() => {
+        if (!document.hidden) setStatus('浏览器阻止了自动关闭，请手动关闭此页。', 'ok');
+      }, 300);
+    }, 900);
+  });
+  document.addEventListener('click', () => {
+    if (closeTimer) {
+      cancelAutoClose();
+      setStatus('已取消自动关闭，可复制链接或手动关闭此页。', 'ok');
+    }
   });
 
   // 先让页面渲染一帧，再尝试外部协议。
@@ -157,7 +187,7 @@ function setupImport(rawLink, name) {
 
   setTimeout(() => {
     if (left) {
-      setStatus('magpie 已打开，请在该窗口中确认添加。', 'ok');
+      setStatus('magpie 已打开；确认添加后切回此页将自动关闭。', 'ok');
       return;
     }
     setStatus('没有自动打开？点击上方“在 magpie 中打开”。');
