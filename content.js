@@ -56,6 +56,11 @@
     prefix: '',
     catalog: '',
     endpoints: { ...DEFAULT_ENDPOINTS },
+    /** @type {Record<'chat'|'responses'|'anthropic'|'gemini', string>} 各端点完整 URL（探测用） */
+    endpointUrls: { chat: '', responses: '', anthropic: '', gemini: '' },
+    /** @type {Record<string, 'ok'|'missing'|'unknown'>} 端点探测结果 */
+    probe: {},
+    probing: false,
     /** @type {{name:string,id:string,link:string,token:Token}[]} */
     queue: [],
     queueIndex: 0,
@@ -235,7 +240,10 @@
   function toast(text, kind = 'info') {
     ensureHost();
     state.shadow.querySelectorAll('.ktm-toast').forEach((el) => el.remove());
-    const el = h('div', { class: `ktm-toast ${kind}` }, text);
+    const el = h('div', {
+      class: `ktm-toast ${kind}`,
+      attrs: { role: 'status', 'aria-live': 'polite' },
+    }, text);
     state.shadow.append(el);
     setTimeout(() => el.remove(), 3400);
   }
@@ -434,20 +442,96 @@
 
   function makeContext(kind, prefix, siteName) {
     const base = prefix || '';
-    return {
+    const origin = location.origin;
+    const ctx = {
       kind,
       prefix: base,
-      origin: location.origin,
+      origin,
       host: location.hostname,
       siteName: cleanSiteName(siteName) || cleanSiteName(document.title) || location.hostname,
-      chat: location.origin + base + '/v1',
-      responses: location.origin + base + '/v1',
-      anthropic: location.origin + base,
-      gemini: location.origin + base + '/v1beta',
-      website: location.origin,
-      keysUrl: location.origin + location.pathname,
+      anthropicBase: origin + base,
+      openaiBase: origin + base + '/v1',
+      geminiBase: origin + base + '/v1beta',
+      website: origin,
+      keysUrl: origin + location.pathname,
       icon: findIcon(),
     };
+    ctx.endpointUrls = {
+      chat: ctx.openaiBase + '/chat/completions',
+      responses: ctx.openaiBase + '/responses',
+      anthropic: ctx.anthropicBase + '/v1/messages',
+      gemini: ctx.geminiBase + '/models',
+    };
+    return ctx;
+  }
+
+  /**
+   * 探测各端点是否真的存在。
+   *
+   * 不同中转站适配的端点不一样（见 magpie 的「API 端点」面板：anthropic
+   * /v1/messages、openai /v1/chat/completions 等）。不存在的端点导入后
+   * magpie 里对话会 404，所以这里逐个发一个最小请求：
+   *   - 404 / 405 → 端点不存在，标记 missing（默认取消勾选）
+   *   - 401 / 400 / 200 → 端点存在（只是没带 key 或参数），标记 ok
+   *
+   * 探测结果只影响默认勾选与 UI 提示，用户仍可在高级设置里手动开关。
+   */
+  async function probeEndpoints(ctx) {
+    const result = { chat: 'unknown', responses: 'unknown', anthropic: 'unknown', gemini: 'unknown' };
+    const urls = ctx.endpointUrls;
+
+    const checks = [
+      {
+        key: 'chat',
+        run: () =>
+          fetchWithTimeout(urls.chat, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: 'probe', messages: [] }),
+          }),
+      },
+      {
+        key: 'responses',
+        run: () =>
+          fetchWithTimeout(urls.responses, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: 'probe', input: '' }),
+          }),
+      },
+      {
+        key: 'anthropic',
+        run: () =>
+          fetchWithTimeout(urls.anthropic, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' },
+            body: JSON.stringify({ model: 'probe', max_tokens: 1, messages: [] }),
+          }),
+      },
+      {
+        key: 'gemini',
+        run: () => fetchWithTimeout(urls.gemini, { method: 'GET' }),
+      },
+    ];
+
+    await Promise.all(
+      checks.map(async ({ key, run }) => {
+        try {
+          const res = await run();
+          if (res.status === 404 || res.status === 405 || res.status === 501) {
+            result[key] = 'missing';
+          } else {
+            // 200/400/401/403/429/5xx 都说明路由存在
+            result[key] = 'ok';
+          }
+        } catch {
+          // 探测失败不影响使用，只是无法给出提示
+          result[key] = 'unknown';
+        }
+      })
+    );
+
+    return result;
   }
 
   async function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT) {
@@ -952,11 +1036,16 @@
 
   function endpointValues() {
     const ctx = state.ctx;
+    if (!ctx) return {};
     const values = {};
-    if (state.endpoints.chat) values.chat = ctx.chat;
-    if (state.endpoints.responses) values.responses = ctx.responses;
-    if (state.endpoints.anthropic) values.anthropic = ctx.anthropic;
-    if (state.endpoints.gemini) values.gemini = ctx.gemini;
+    // magpie 的四个参数都是「基础 URL」，具体方法路径由 magpie 自己拼：
+    //   chat/responses → 站点 /v1（拼 /chat/completions、/responses）
+    //   anthropic      → 站点根（拼 /v1/messages，Claude Code 用）
+    //   gemini         → 站点 /v1beta（拼 /models）
+    if (state.endpoints.chat) values.chat = ctx.openaiBase;
+    if (state.endpoints.responses) values.responses = ctx.openaiBase;
+    if (state.endpoints.anthropic) values.anthropic = ctx.anthropicBase;
+    if (state.endpoints.gemini) values.gemini = ctx.geminiBase;
     return values;
   }
 
@@ -1066,6 +1155,35 @@
     state.prefix = typeof prefs.prefix === 'string' ? prefs.prefix : ctx.siteName;
     state.catalog = typeof prefs.catalog === 'string' ? prefs.catalog : '';
     state.endpoints = { ...DEFAULT_ENDPOINTS, ...(prefs.endpoints || {}) };
+    state.probe = {};
+
+    // 探测站点支持的端点：missing 的端点默认不勾选。
+    // 用户手动改过端点偏好（prefs.endpoints 存在）时尊重用户选择。
+    const userConfigured = Boolean(prefs.endpoints);
+    state.probing = true;
+    probeEndpoints(ctx)
+      .then((probe) => {
+        // 面板可能已被关闭或切换了站点
+        if (state.ctx !== ctx) return;
+        state.probe = probe;
+        if (!userConfigured) {
+          for (const key of Object.keys(DEFAULT_ENDPOINTS)) {
+            if (probe[key] === 'missing') state.endpoints[key] = false;
+          }
+        }
+        if (state.dialogOpen) {
+          updateEndpointSummary();
+          updateFooter();
+          drawList();
+        }
+      })
+      .finally(() => {
+        if (state.ctx === ctx) state.probing = false;
+        if (state.dialogOpen) {
+          updateEndpointSummary();
+          updateFooter();
+        }
+      });
   }
 
   const savePrefs = debounce(() => {
@@ -1085,7 +1203,8 @@
       toast('请在令牌管理页使用这个功能。');
       return;
     }
-    if (state.dialogOpen && !state.loading) return;
+    // 出错时允许重试：只有「已打开且无错误」才直接返回。
+    if (state.dialogOpen && !state.error) return;
 
     state.dialogOpen = true;
     state.loading = true;
@@ -1095,6 +1214,8 @@
     state.selected.clear();
     state.keyCache.clear();
     state.newApiToken = '';
+    state.probe = {};
+    state.probing = false;
     ensureHost();
     renderAll();
 
@@ -1161,7 +1282,10 @@
     }
     if (state.importBtn) {
       state.importBtn.disabled =
-        state.selected.size === 0 || state.busy || !httpAllowed() || !Object.values(state.endpoints).some(Boolean);
+        state.selected.size === 0 ||
+        state.busy ||
+        !httpAllowed() ||
+        Object.keys(endpointValues()).length === 0;
       state.importBtn.textContent = state.busy
         ? '正在读取 Key…'
         : state.selected.size
@@ -1296,7 +1420,7 @@
       loading.append(document.createTextNode('正在读取令牌…'));
       body.append(loading);
     } else if (state.error) {
-      const error = h('div', { class: 'ktm-error' });
+      const error = h('div', { class: 'ktm-error', attrs: { role: 'alert' } });
       error.append(h('div', { class: 'ktm-error-title' }, '读取失败'));
       error.append(h('div', { class: 'ktm-error-text' }, state.error));
       const actions = h('div', { class: 'ktm-error-actions' });
@@ -1333,6 +1457,7 @@
         type: 'search',
         placeholder: '搜索令牌名 / 分组 / Key…',
         value: state.query,
+        attrs: { 'aria-label': '搜索令牌' },
       });
       search.addEventListener('input', () => {
         state.query = search.value;
@@ -1391,6 +1516,7 @@
         anthropic: 'Anthropic',
         gemini: 'Gemini',
       };
+      const probeLabels = { ok: '已检测到', missing: '未检测到', unknown: '未探测' };
       for (const key of Object.keys(endpointLabels)) {
         const checkbox = h('input', {
           type: 'checkbox',
@@ -1402,8 +1528,19 @@
           updateEndpointSummary();
           updateFooter();
         });
+        const probe = state.probe[key];
+        const badge =
+          probe && probe !== 'unknown'
+            ? h('span', { class: `ktm-probe ${probe}` }, probeLabels[probe])
+            : null;
         endpoints.append(
-          h('label', { class: 'ktm-toggle' }, checkbox, h('span', {}, endpointLabels[key]))
+          h(
+            'label',
+            { class: 'ktm-toggle' },
+            checkbox,
+            h('span', {}, endpointLabels[key]),
+            badge
+          )
         );
       }
       grid.append(
@@ -1460,9 +1597,16 @@
     if (!state.endpointSummaryEl || !state.ctx) return;
     const values = endpointValues();
     const rows = Object.entries(values).map(([key, value]) => `${key}: ${value}`);
+    const missing = Object.keys(state.probe).filter((key) => state.probe[key] === 'missing');
+    const hint = missing.length
+      ? `站点未适配：${missing.join(' / ')}（已自动取消勾选，可手动开启）`
+      : state.probing
+        ? '正在探测站点支持的端点…'
+        : '';
     state.endpointSummaryEl.replaceChildren(
       h('div', { class: 'ktm-preview-title' }, '将写入 magpie 的端点'),
-      ...rows.map((row) => h('code', { class: 'ktm-preview-row' }, row))
+      ...rows.map((row) => h('code', { class: 'ktm-preview-row' }, row)),
+      hint ? h('div', { class: 'ktm-preview-hint' }, hint) : null
     );
   }
 
@@ -1475,7 +1619,7 @@
       toast('当前站点是 http，magpie 只接受 https 导入链接（本机 / 局域网除外）。', 'error');
       return;
     }
-    if (!Object.values(state.endpoints).some(Boolean)) {
+    if (!Object.keys(endpointValues()).length) {
       toast('请至少保留一个 API 端点。', 'error');
       return;
     }
@@ -1650,18 +1794,54 @@
   // 批量命令
   // ---------------------------------------------------------------------------
 
-  function openBatch() {
+  async function openBatch() {
+    if (state.busy) return;
+
     if (!state.queue.length) {
+      // 没有队列时直接用当前选中项生成命令，不必先走一遍导入。
       const selected = state.tokens.filter((token) => state.selected.has(token.id));
       if (!selected.length) {
         toast('请先选择要导入的 Key。', 'warn');
         return;
       }
-      toast('批量命令需要先在当前 Key 上点一次“导入选中”，或直接使用 CLI。', 'warn');
-      return;
+      if (!httpAllowed()) {
+        toast('当前站点是 http，magpie 只接受 https 导入链接（本机 / 局域网除外）。', 'error');
+        return;
+      }
+      if (!Object.keys(endpointValues()).length) {
+        toast('请至少保留一个 API 端点。', 'error');
+        return;
+      }
+
+      state.busy = true;
+      updateFooter();
+      try {
+        const { map, failures } = await resolveKeys(selected);
+        const usable = selected.filter((token) => map.has(token.id));
+        if (!usable.length) {
+          throw new Error('没有获取到完整的 API Key，请刷新页面后重试。');
+        }
+        const items = buildImportItems(usable, map);
+        // 立即清掉完整 key 和缓存，命令文本留在内存里供复制。
+        for (const token of state.tokens) {
+          if (token.fullKey) token.fullKey = '';
+        }
+        state.keyCache.clear();
+        state.batchText = items.map((item) => `magpie import -y ${shellQuote(item.link)}`).join('\n');
+        if (failures.length) {
+          toast(`${failures.length} 个 Key 获取失败，未包含在命令中。`, 'warn');
+        }
+      } catch (error) {
+        toast(error && error.message ? error.message : String(error), 'error');
+        return;
+      } finally {
+        state.busy = false;
+        updateFooter();
+      }
+    } else {
+      state.batchText = state.queue.map((item) => `magpie import -y ${shellQuote(item.link)}`).join('\n');
     }
-    const lines = state.queue.map((item) => `magpie import -y ${shellQuote(item.link)}`);
-    state.batchText = lines.join('\n');
+
     state.batchOpen = true;
     renderAll();
   }
@@ -1872,9 +2052,20 @@
     .ktm-endpoints { display: flex; flex-wrap: wrap; gap: 12px; padding-top: 2px; }
     .ktm-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 500; color: var(--ktm-fg); cursor: pointer; }
     .ktm-toggle input { accent-color: var(--ktm-brand); }
+    .ktm-probe {
+      display: inline-flex; align-items: center; height: 16px; padding: 0 6px; border-radius: 999px;
+      font-size: 10px; font-weight: 650; letter-spacing: .01em;
+    }
+    .ktm-probe.ok { color: var(--ktm-ok); background: color-mix(in srgb, var(--ktm-ok) 10%, transparent); }
+    .ktm-probe.missing { color: var(--ktm-bad); background: color-mix(in srgb, var(--ktm-bad) 10%, transparent); }
     .ktm-preview { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--ktm-muted); }
     .ktm-preview-title { font-weight: 650; margin-bottom: 2px; }
     .ktm-preview-row { background: none !important; border: 0 !important; padding: 0 !important; color: var(--ktm-muted) !important; }
+    .ktm-preview-hint { color: var(--ktm-bad); font-size: 11px; }
+    .ktm-btn:focus-visible, .ktm-icon-btn:focus-visible, .ktm-check:focus-visible, .ktm-toggle input:focus-visible {
+      outline: 2px solid var(--ktm-brand); outline-offset: 2px;
+    }
+    .ktm-search:focus-visible, .ktm-input:focus-visible { border-color: var(--ktm-brand); box-shadow: 0 0 0 3px rgba(124,58,237,.14); }
     .ktm-foot {
       display: flex; align-items: center; justify-content: space-between; gap: 12px;
       padding: 12px 18px 16px; border-top: 1px solid var(--ktm-line);

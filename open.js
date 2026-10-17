@@ -9,14 +9,6 @@
 
 const $ = (id) => document.getElementById(id);
 
-function safeDecode(value) {
-  try {
-    return decodeURIComponent(value);
-  } catch {
-    return value;
-  }
-}
-
 function parseLink(raw) {
   if (!raw) return null;
   try {
@@ -28,7 +20,6 @@ function parseLink(raw) {
     return null;
   }
 }
-
 function hostOf(value) {
   try {
     return new URL(value).host;
@@ -181,7 +172,8 @@ function main() {
     return;
   }
 
-  const rawLink = safeDecode(params.get('link') || '');
+  // URLSearchParams.get 已做一次解码；不要再 decode，否则含 % 的参数会被二次解码破坏。
+  const rawLink = params.get('link') || '';
   const name = params.get('name') || '';
   setupImport(rawLink, name);
 }

@@ -14,9 +14,30 @@
 
 const IMPORT_PAGE = 'open.html';
 const MAX_LINK_LENGTH = 64 * 1024;
+const OPEN_TAB_KEY = 'ktm:openTabId';
 
-/** @type {number|null} 当前用于打开 magpie 链接的标签页 */
-let openTabId = null;
+/**
+ * MV3 service worker 会在空闲约 30 秒后被回收，全局变量里的 openTabId
+ * 会随之丢失，所以持久化到 chrome.storage.session（浏览器关闭前有效）。
+ */
+async function getOpenTabId() {
+  try {
+    const stored = await chrome.storage.session.get(OPEN_TAB_KEY);
+    const id = stored && stored[OPEN_TAB_KEY];
+    return typeof id === 'number' ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+async function setOpenTabId(tabId) {
+  try {
+    if (tabId == null) await chrome.storage.session.remove(OPEN_TAB_KEY);
+    else await chrome.storage.session.set({ [OPEN_TAB_KEY]: tabId });
+  } catch {
+    /* storage.session 不可用时静默降级：只是失去标签页复用能力 */
+  }
+}
 
 function isAllowedImportLink(link) {
   return (
@@ -35,13 +56,14 @@ function importPageUrl(link, label) {
 }
 
 function createImportTab(url, sendResponse) {
-  chrome.tabs.create({ url, active: true }, (tab) => {
+  chrome.tabs.create({ url, active: true }, async (tab) => {
     if (chrome.runtime.lastError) {
       sendResponse({ ok: false, error: chrome.runtime.lastError.message });
       return;
     }
-    openTabId = tab && tab.id != null ? tab.id : null;
-    sendResponse({ ok: true, tabId: openTabId });
+    const tabId = tab && tab.id != null ? tab.id : null;
+    await setOpenTabId(tabId);
+    sendResponse({ ok: true, tabId });
   });
 }
 
@@ -49,15 +71,22 @@ function openImportTab(link, label, reuse, sendResponse) {
   const url = importPageUrl(link, label);
 
   // 复用上一次的扩展页：页面重新加载后会再次尝试打开 magpie。
-  if (reuse && openTabId != null) {
-    chrome.tabs.update(openTabId, { url, active: true }, (tab) => {
-      if (chrome.runtime.lastError || !tab) {
-        openTabId = null;
+  if (reuse) {
+    (async () => {
+      const previous = await getOpenTabId();
+      if (previous == null) {
         createImportTab(url, sendResponse);
         return;
       }
-      sendResponse({ ok: true, tabId: openTabId });
-    });
+      chrome.tabs.update(previous, { url, active: true }, async (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+          await setOpenTabId(null);
+          createImportTab(url, sendResponse);
+          return;
+        }
+        sendResponse({ ok: true, tabId: previous });
+      });
+    })();
     return;
   }
 
@@ -70,19 +99,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message) return false;
 
   if (message.type === 'KTM_FINISH_IMPORT') {
-    if (openTabId == null) {
-      sendResponse({ ok: true });
-      return false;
-    }
-    chrome.tabs.update(
-      openTabId,
-      { url: chrome.runtime.getURL(IMPORT_PAGE) + '?done=1' },
-      () => {
-        if (chrome.runtime.lastError) openTabId = null;
+    (async () => {
+      const tabId = await getOpenTabId();
+      if (tabId == null) {
         sendResponse({ ok: true });
+        return;
       }
-    );
-    return true;
+      chrome.tabs.update(tabId, { url: chrome.runtime.getURL(IMPORT_PAGE) + '?done=1' }, async () => {
+        if (chrome.runtime.lastError) await setOpenTabId(null);
+        sendResponse({ ok: true });
+      });
+    })();
+    return true; // 异步响应
   }
 
   if (message.type !== 'KTM_OPEN_IMPORT') return false;
@@ -100,5 +128,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  if (tabId === openTabId) openTabId = null;
+  (async () => {
+    const current = await getOpenTabId();
+    if (current === tabId) await setOpenTabId(null);
+  })();
 });

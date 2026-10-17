@@ -57,4 +57,3 @@ async function openPanel() {
 }
 
 openBtn.addEventListener('click', openPanel);
-openPanel.disabled = false;
