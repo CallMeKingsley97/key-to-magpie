@@ -191,7 +191,19 @@ function setupImport(rawLink, name) {
       return;
     }
     setStatus('没有自动打开？点击上方“在 magpie 中打开”。');
-    $('foot').textContent = '如果仍然没有反应，请确认已安装 magpie，并允许浏览器打开 magpie 链接。';
+    // 最常见的原因是 magpie 还没装，所以给一个下载入口。
+    // 刻意不带任何参数：把 key 放进 usemagpie.ai 的地址栏会在浏览历史里
+    // 留下一条第三方来源的记录，而这里只需要引导下载。
+    const foot = $('foot');
+    foot.replaceChildren(
+      document.createTextNode('如果仍然没有反应，请确认已安装 magpie，并允许浏览器打开 magpie 链接。还没安装？'),
+      Object.assign(document.createElement('a'), {
+        href: 'https://usemagpie.ai/',
+        target: '_blank',
+        rel: 'noopener noreferrer',
+        textContent: '前往下载',
+      })
+    );
   }, 2800);
 }
 

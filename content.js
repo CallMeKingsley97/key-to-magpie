@@ -56,6 +56,11 @@
     prefix: '',
     catalog: '',
     endpoints: { ...DEFAULT_ENDPOINTS },
+    /**
+     * 是否在批量命令里补一条 magpie provider set 配置余额查询。
+     * import 链接没有 balance 参数，只能导入后用 CLI 补。
+     */
+    balance: true,
     /** @type {Record<'chat'|'responses'|'anthropic'|'gemini', string>} 各端点完整 URL（探测用） */
     endpointUrls: { chat: '', responses: '', anthropic: '', gemini: '' },
     /** @type {Record<string, 'ok'|'missing'|'unknown'>} 端点探测结果 */
@@ -72,6 +77,7 @@
     newApiToken: '',
     refreshPromise: null,
     subRefreshPromise: null,
+    authError: '',
 
     host: null,
     shadow: null,
@@ -81,6 +87,7 @@
     selectAllBtn: null,
     importBtn: null,
     endpointSummaryEl: null,
+    balanceHintEl: null,
     queueEl: null,
   };
 
@@ -424,15 +431,46 @@
     return Array.from(out).sort((a, b) => a.length - b.length);
   }
 
-  function findIcon() {
+  /**
+   * 检查一个候选图标 URL 能否作为 magpie 的 icon= 参数。
+   *
+   * magpie 对这个参数校验很严（见其 importurl.go 的 iconURL）：必须是
+   * https、公网 host、不能带用户名密码或 fragment，否则整个导入链接会被
+   * 判为无效。所以这里先过滤，宁可少传一个图标，也不能让导入失败。
+   */
+  function iconParam(value) {
+    // 空值要单独挡掉：new URL('', base) 会解析成页面地址本身，
+    // 而站点 logo 字段为空正是常见情况（此时应回退到 favicon）。
+    // 含空白的值也不是 URL，同样挡掉，避免被当成相对路径解析。
+    const raw = String(value || '').trim();
+    if (!raw || /\s/.test(raw)) return '';
+    try {
+      const url = new URL(raw, location.href);
+      if (url.protocol !== 'https:') return '';
+      if (!url.hostname || isLocalHostname(url.hostname)) return '';
+      if (url.username || url.password || url.hash) return '';
+      if (url.href === location.href) return '';
+      return url.href;
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * 站点自己的 logo。
+   *
+   * new-api 与 sub2api 的公开接口都带站点 logo，这是站点运营者设置的图，
+   * 比页面 favicon 更准确：magpie 的 favicon.go 明确说过，这类面板的
+   * /favicon.ico 是面板自带的，每个中转站长得一模一样。
+   */
+  function findIcon(siteLogo) {
+    const own = iconParam(siteLogo);
+    if (own) return own;
+
     const candidates = Array.from(document.querySelectorAll('link[rel~="icon"], link[rel="shortcut icon"]'));
     for (const link of candidates) {
-      try {
-        const url = new URL(link.href, location.href);
-        if (url.protocol === 'https:' && !isLocalHostname(url.hostname)) return url.href;
-      } catch {
-        /* ignore */
-      }
+      const url = iconParam(link.href);
+      if (url) return url;
     }
     if (location.protocol === 'https:' && !isLocalHostname(location.hostname)) {
       return location.origin + '/favicon.ico';
@@ -440,7 +478,22 @@
     return '';
   }
 
-  function makeContext(kind, prefix, siteName) {
+  /**
+   * 站点的余额查询端点。
+   *
+   * magpie 内置了这两种面板的余额查询，都只需要 key，且会按路径自动推断
+   * 取值字段（见其 balance.go 的 balancePathOf）：
+   *   new-api  /api/usage/token  → $data.total_available / 500000
+   *   sub2api  /v1/usage         → $remaining
+   * 但 magpie://import 没有 balance 参数，只能导入后用 CLI 补上。
+   */
+  function balanceUrlFor(kind, origin, base) {
+    if (kind === 'newapi') return origin + base + '/api/usage/token';
+    if (kind === 'sub2api') return origin + base + '/v1/usage';
+    return '';
+  }
+
+  function makeContext(kind, prefix, siteName, siteLogo) {
     const base = prefix || '';
     const origin = location.origin;
     const ctx = {
@@ -454,7 +507,9 @@
       geminiBase: origin + base + '/v1beta',
       website: origin,
       keysUrl: origin + location.pathname,
-      icon: findIcon(),
+      icon: findIcon(siteLogo),
+      /** 站点自己的余额查询端点（magpie provider set balance=…），没有则为空 */
+      balanceUrl: balanceUrlFor(kind, origin, base),
     };
     ctx.endpointUrls = {
       chat: ctx.openaiBase + '/chat/completions',
@@ -587,7 +642,7 @@
           const json = await safeJson(sub);
           const data = json && json.data;
           if (data && (typeof data.site_name === 'string' || typeof data.version === 'string')) {
-            return makeContext('sub2api', prefix, data.site_name);
+            return makeContext('sub2api', prefix, data.site_name, data.site_logo);
           }
         }
       } catch {
@@ -600,7 +655,7 @@
           const json = await safeJson(nw);
           const data = json && json.data;
           if (data && (typeof data.system_name === 'string' || typeof data.version === 'string')) {
-            return makeContext('newapi', prefix, data.system_name);
+            return makeContext('newapi', prefix, data.system_name, data.logo);
           }
         }
       } catch {
@@ -609,8 +664,9 @@
     }
 
     // 公开接口被挡时，用页面自身的特征兜底。
+    // __APP_CONFIG__ 是 sub2api 前端注入的公开设置副本，字段与接口一致。
     if (window.__APP_CONFIG__ && typeof window.__APP_CONFIG__.site_name === 'string') {
-      return makeContext('sub2api', '', window.__APP_CONFIG__.site_name);
+      return makeContext('sub2api', '', window.__APP_CONFIG__.site_name, window.__APP_CONFIG__.site_logo);
     }
 
     if (document.querySelector('[data-tour="keys-create-btn"]')) {
@@ -654,23 +710,71 @@
   // 读取令牌
   // ---------------------------------------------------------------------------
 
+  async function runPageAuthOperation(operation) {
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const result = await new Promise((resolve, reject) => {
+      const timeoutMs = operation === 'sub2api.read' ? 1500 : FETCH_TIMEOUT + 1000;
+      const timeout = setTimeout(() => {
+        window.removeEventListener('message', onMessage);
+        reject(new Error('页面认证桥接超时。'));
+      }, timeoutMs);
+
+      const onMessage = (event) => {
+        const message = event.data;
+        if (
+          event.source !== window ||
+          event.origin !== location.origin ||
+          !message ||
+          message.source !== 'KTM_PAGE_AUTH_RESPONSE' ||
+          message.requestId !== requestId
+        ) return;
+
+        clearTimeout(timeout);
+        window.removeEventListener('message', onMessage);
+        if (message.error) reject(new Error(message.error));
+        else resolve(message.data || {});
+      };
+
+      window.addEventListener('message', onMessage);
+      window.postMessage({
+        source: 'KTM_PAGE_AUTH_REQUEST',
+        requestId,
+        operation,
+        prefix: state.ctx ? state.ctx.prefix : '',
+      }, location.origin);
+    });
+
+    return result;
+  }
+
   async function refreshNewApi(ctx) {
     if (state.refreshPromise) return state.refreshPromise;
 
     state.refreshPromise = (async () => {
       try {
-        const res = await fetchWithTimeout(ctx.prefix + '/api/user/auth/refresh', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        });
-        const json = await safeJson(res);
-        const token = json && json.success && json.data && json.data.access_token;
-        if (res.ok && typeof token === 'string' && token) {
+        const result = await runPageAuthOperation('newapi.refresh');
+        if (typeof result.accessToken === 'string' && result.accessToken) {
+          const token = result.accessToken;
           state.newApiToken = token;
           return token;
         }
+        if (result.status >= 400) state.authError = `登录状态刷新失败（HTTP ${result.status}）。`;
       } catch {
-        /* ignore */
+        try {
+          const response = await fetchWithTimeout(ctx.prefix + '/api/user/auth/refresh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+          });
+          const json = await safeJson(response);
+          const token = json && json.success && json.data && json.data.access_token;
+          if (response.ok && typeof token === 'string' && token) {
+            state.newApiToken = token;
+            return token;
+          }
+          if (response.status >= 400) state.authError = `登录状态刷新失败（HTTP ${response.status}）。`;
+        } catch {
+          /* ignore */
+        }
       }
       return '';
     })().finally(() => {
@@ -764,6 +868,13 @@
     if (state.subRefreshPromise) return state.subRefreshPromise;
 
     state.subRefreshPromise = (async () => {
+      try {
+        const result = await runPageAuthOperation('sub2api.refresh');
+        if (typeof result.accessToken === 'string') return result.accessToken;
+        if (result.status >= 400) state.authError = `登录状态刷新失败（HTTP ${result.status}）。`;
+      } catch {
+      }
+
       let refreshToken = '';
       try {
         refreshToken = localStorage.getItem('refresh_token') || '';
@@ -798,6 +909,7 @@
           }
           return accessToken;
         }
+        if (res.status >= 400) state.authError = `登录状态刷新失败（HTTP ${res.status}）。`;
       } catch {
         /* ignore */
       }
@@ -812,9 +924,14 @@
   async function loadSub2ApiTokens(ctx) {
     let authToken = '';
     try {
-      authToken = localStorage.getItem('auth_token') || '';
+      const result = await runPageAuthOperation('sub2api.read');
+      authToken = typeof result.accessToken === 'string' ? result.accessToken : '';
     } catch {
-      /* ignore */
+      try {
+        authToken = localStorage.getItem('auth_token') || '';
+      } catch {
+        /* ignore */
+      }
     }
 
     const headers = () => (authToken ? { Authorization: 'Bearer ' + authToken } : {});
@@ -837,8 +954,9 @@
         }
       }
 
-      if (res.status === 401 || res.status === 403) {
-        throw new Error('登录状态已失效，请刷新页面并重新登录。');
+      if (res.status === 401) throw new Error(state.authError || '登录状态已失效，请刷新页面并重新登录。');
+      if (res.status === 403) {
+        throw new Error('站点拒绝读取令牌列表（HTTP 403），请检查账号权限或站点访问策略。');
       }
       if (res.status === 404) {
         throw new Error('没有找到 sub2api 的令牌接口。');
@@ -884,8 +1002,9 @@
         }
       }
       if (!res) throw new Error('读取令牌失败：网络错误。');
-      if (res.status === 401 || res.status === 403) {
-        throw new Error('登录状态已失效，请刷新页面并重新登录。');
+      if (res.status === 401) throw new Error(state.authError || '登录状态已失效，请刷新页面并重新登录。');
+      if (res.status === 403) {
+        throw new Error('站点拒绝读取令牌列表（HTTP 403），请检查账号权限或站点访问策略。');
       }
       if (res.status === 404) {
         throw new Error('没有找到 new-api 的令牌接口。');
@@ -931,6 +1050,45 @@
   // 读取完整 Key
   // ---------------------------------------------------------------------------
 
+  /**
+   * 用明文 key 调 /v1/models，补全 sub2api 令牌的模型列表。
+   *
+   * 该接口按 key 所属分组的模型白名单过滤，所以拿到的是这个 key 真正能用
+   * 的模型，比分组配置本身更准确。并发数限制得比较低，避免给站点压力。
+   * 任何失败都只是让这个 key 的模型列表留空，由 magpie 导入后自行获取。
+   */
+  async function fillSub2ApiModels(tokens, keys) {
+    const targets = tokens.filter((token) => keys.has(token.id) && !token.models.length);
+    if (!targets.length) return;
+
+    const CONCURRENCY = 4;
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < targets.length) {
+        const token = targets[cursor];
+        cursor += 1;
+        try {
+          const res = await fetchWithTimeout(
+            state.ctx.openaiBase + '/models',
+            { headers: { Authorization: 'Bearer ' + keys.get(token.id) } },
+            8000
+          );
+          if (!res.ok) continue;
+          const json = await safeJson(res);
+          const data = json && json.data;
+          if (!Array.isArray(data)) continue;
+          const models = data
+            .map((row) => (row && typeof row.id === 'string' ? row.id.trim() : ''))
+            .filter(Boolean);
+          if (models.length) token.models = models;
+        } catch {
+          /* 拿不到就留空 */
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
+  }
+
   async function resolveKeys(tokens) {
     const map = new Map();
     const failures = [];
@@ -943,6 +1101,10 @@
           failures.push(token);
         }
       }
+      // sub2api 的模型限制挂在分组上，列表接口不返回，所以这里用明文 key
+      // 调一次 /v1/models：该接口按 key 所属分组的 allowlist 过滤，结果就是
+      // 这个 key 实际能用的模型。失败不影响导入，留空让 magpie 自己获取。
+      await fillSub2ApiModels(tokens, map);
       return { map, failures };
     }
 
@@ -1155,6 +1317,7 @@
     state.prefix = typeof prefs.prefix === 'string' ? prefs.prefix : ctx.siteName;
     state.catalog = typeof prefs.catalog === 'string' ? prefs.catalog : '';
     state.endpoints = { ...DEFAULT_ENDPOINTS, ...(prefs.endpoints || {}) };
+    state.balance = typeof prefs.balance === 'boolean' ? prefs.balance : true;
     state.probe = {};
 
     // 探测站点支持的端点：missing 的端点默认不勾选。
@@ -1194,6 +1357,7 @@
         prefix: state.prefix,
         catalog: state.catalog,
         endpoints: { ...state.endpoints },
+        balance: state.balance,
       },
     });
   }, 400);
@@ -1214,6 +1378,7 @@
     state.selected.clear();
     state.keyCache.clear();
     state.newApiToken = '';
+    state.authError = '';
     state.probe = {};
     state.probing = false;
     ensureHost();
@@ -1249,6 +1414,7 @@
     state.selectAllBtn = null;
     state.importBtn = null;
     state.endpointSummaryEl = null;
+    state.balanceHintEl = null;
     if (clear && !state.queue.length) {
       state.tokens = [];
       state.selected.clear();
@@ -1509,6 +1675,27 @@
         h('label', { class: 'ktm-field' }, h('span', {}, 'models.dev 目录（可选）'), catalogInput)
       );
 
+      // magpie 内置了 new-api / sub2api 的余额查询，但 import 链接传不了，
+      // 只能在批量命令里补一条 provider set。
+      const balanceBox = h('input', { type: 'checkbox', checked: state.balance });
+      balanceBox.addEventListener('change', () => {
+        state.balance = balanceBox.checked;
+        savePrefs();
+        updateBalanceHint();
+      });
+      const balanceHint = h('span', { class: 'ktm-hint' });
+      state.balanceHintEl = balanceHint;
+      grid.append(
+        h(
+          'label',
+          { class: 'ktm-toggle' },
+          balanceBox,
+          h('span', {}, '在批量命令中配置余额查询'),
+          balanceHint
+        )
+      );
+      updateBalanceHint();
+
       const endpoints = h('div', { class: 'ktm-endpoints' });
       const endpointLabels = {
         chat: 'OpenAI Chat',
@@ -1591,6 +1778,26 @@
     }
 
     return overlay;
+  }
+
+  /**
+   * 余额开关的说明文字。
+   *
+   * magpie 按余额端点的路径自动推断取值字段，所以这里只需要给出 URL；
+   * 站点类型识别不出来时（如公开接口被挡的兜底路径）没有可用的端点，
+   * 开关就没有意义，直接标注出来。
+   */
+  function updateBalanceHint() {
+    const el = state.balanceHintEl;
+    if (!el) return;
+    const url = state.ctx && state.ctx.balanceUrl;
+    if (!url) {
+      el.textContent = '当前站点未识别出余额接口';
+      el.className = 'ktm-hint muted';
+      return;
+    }
+    el.textContent = url;
+    el.className = 'ktm-hint';
   }
 
   function updateEndpointSummary() {
@@ -1827,7 +2034,7 @@
           if (token.fullKey) token.fullKey = '';
         }
         state.keyCache.clear();
-        state.batchText = items.map((item) => `magpie import -y ${shellQuote(item.link)}`).join('\n');
+        state.batchText = batchCommands(items);
         if (failures.length) {
           toast(`${failures.length} 个 Key 获取失败，未包含在命令中。`, 'warn');
         }
@@ -1839,11 +2046,31 @@
         updateFooter();
       }
     } else {
-      state.batchText = state.queue.map((item) => `magpie import -y ${shellQuote(item.link)}`).join('\n');
+      state.batchText = batchCommands(state.queue);
     }
 
     state.batchOpen = true;
     renderAll();
+  }
+
+  /**
+   * 生成批量导入命令。
+   *
+   * magpie://import 没有 balance 参数，余额查询只能在导入后用
+   * `magpie provider set <id> balance=<url>` 补上。provider id 由
+   * providerId() 生成，与 magpie 的 Slug() 规则一致，且 magpie 保存时会
+   * 原样沿用链接里的 id，所以这里可以放心引用。
+   */
+  function batchCommands(items) {
+    const lines = [];
+    const balanceUrl = state.balance && state.ctx ? state.ctx.balanceUrl : '';
+    for (const item of items) {
+      lines.push(`magpie import -y ${shellQuote(item.link)}`);
+      if (balanceUrl) {
+        lines.push(`magpie provider set ${shellQuote(item.id)} balance=${shellQuote(balanceUrl)}`);
+      }
+    }
+    return lines.join('\n');
   }
 
   function renderBatch() {
@@ -2058,6 +2285,11 @@
     }
     .ktm-probe.ok { color: var(--ktm-ok); background: color-mix(in srgb, var(--ktm-ok) 10%, transparent); }
     .ktm-probe.missing { color: var(--ktm-bad); background: color-mix(in srgb, var(--ktm-bad) 10%, transparent); }
+    .ktm-hint {
+      font-size: 11px; font-weight: 400; color: var(--ktm-muted);
+      max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .ktm-hint.muted { opacity: .7; font-style: italic; }
     .ktm-preview { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--ktm-muted); }
     .ktm-preview-title { font-weight: 650; margin-bottom: 2px; }
     .ktm-preview-row { background: none !important; border: 0 !important; padding: 0 !important; color: var(--ktm-muted) !important; }

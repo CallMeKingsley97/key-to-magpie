@@ -2,11 +2,11 @@
 
 简体中文 | [English](./README_EN.md)
 
-Chrome 插件：在 [new-api](https://github.com/QuantumNous/new-api) / [sub2api](https://github.com/Wei-Shaw/sub2api) 的令牌管理页面增加「导入到 magpie」按钮，把你的 API Key 通过 [magpie](https://github.com/yetone/magpie) 官方导入协议（`magpie://import` 链接）一键导入为 provider。
+适用于 Chrome 和 Microsoft Edge（Chromium 111+）的扩展：在 [new-api](https://github.com/QuantumNous/new-api) / [sub2api](https://github.com/Wei-Shaw/sub2api) 的令牌管理页面增加「导入到 magpie」按钮，把你的 API Key 通过 [magpie](https://github.com/yetone/magpie) 官方导入协议（`magpie://import` 链接）一键导入为 provider。
 
 ## 安装
 
-1. 打开 Chrome，进入 `chrome://extensions`
+1. 打开 Chrome 的 `chrome://extensions`，或 Edge 的 `edge://extensions`
 2. 右上角打开「开发者模式」
 3. 点「加载已解压的扩展程序」，选择本目录（`key-to-magpie/`）
 4. 确认 magpie 桌面应用已安装并至少运行过一次（`/Applications/magpie.app`）
@@ -33,8 +33,34 @@ Chrome 插件：在 [new-api](https://github.com/QuantumNous/new-api) / [sub2api
 | anthropic | `https://站点`（Claude Code 用） |
 | gemini | `https://站点/v1beta` |
 | key | 令牌明文 key（经站点接口取回，只在本机传递） |
-| models | new-api 令牌的「模型限制」列表（未限制则留空） |
+| models | new-api 令牌的「模型限制」列表；sub2api 用明文 key 调 `/v1/models` 取得（未限制则留空） |
 | catalog / website / keys | 自动补全（models.dev、站点首页、令牌页地址） |
+| icon | 站点在公开接口里配置的 logo（见下） |
+
+### 图标
+
+`icon` 优先取站点自己在公开接口里设置的 logo（new-api 的 `/api/status` →
+`logo`，sub2api 的 `/api/v1/settings/public` → `site_logo`），取不到才退回
+页面 favicon。
+
+magpie 对 `icon` 校验很严（必须 https、公网 host、不带凭据和 fragment），
+不合格的值会让整个导入链接失效，所以插件会先过滤；过滤后为空就不传这个
+参数，由 magpie 用自己的字母色块或 catalog 图标——这比传一个所有中转站
+都长一样的面板 favicon 更好。
+
+### 余额查询
+
+magpie 内置了 new-api 和 sub2api 的余额查询，但 `magpie://import` 没有
+`balance` 参数，只能在导入后用 CLI 补上。勾选「高级设置 → 在批量命令中
+配置余额查询」后，「批量命令」里每个 key 会多出一行：
+
+```sh
+magpie provider set '<id>' balance='https://站点/api/usage/token'
+```
+
+magpie 会按端点路径自动推断取值字段（new-api 的 `/api/usage/token`、
+sub2api 的 `/v1/usage`），所以只需要给 URL。这个开关只影响「批量命令」，
+因为单个导入走的是图形界面，没有执行命令的环节。
 
 ### 端点探测
 
@@ -54,6 +80,8 @@ Chrome 插件：在 [new-api](https://github.com/QuantumNous/new-api) / [sub2api
 ## 安全说明
 
 - 插件只在当前站点内发同源请求读取令牌列表和明文 key，不经过任何第三方服务器
+- 登录态在令牌页的页面上下文中读取和刷新，令牌只用于当前站点请求
+- sub2api 站会用明文 key 调本站的 `/v1/models` 取模型列表，同样是同源请求
 - key 只出现在 magpie 导入链接里；链接在扩展内页打开后立即从地址栏清除
 - magpie 收到链接后会先显示确认弹窗，你点 Add 才会写入 `~/.config/magpie/providers.json`
 - 插件不申请任何 host 权限，只在匹配的令牌页路径下激活
@@ -61,6 +89,7 @@ Chrome 插件：在 [new-api](https://github.com/QuantumNous/new-api) / [sub2api
 ## 手动测试清单
 
 - [ ] `chrome://extensions` 加载本目录，无报错
+- [ ] 在 Edge 的 `edge://extensions` 加载本目录，刷新已登录的令牌页并确认面板能列出令牌
 - [ ] 打开 `https://api.chengmo.cc.cd/keys`（new-api），页面出现「导入到 magpie」按钮
 - [ ] 点击按钮，面板列出账号下的所有令牌
 - [ ] 勾选一个 key 导入 → magpie 弹出确认窗，host / key / 模型正确 → 点 Add
@@ -69,6 +98,10 @@ Chrome 插件：在 [new-api](https://github.com/QuantumNous/new-api) / [sub2api
 - [ ] （可选）在 sub2api 站 `/keys` 页重复上述验证
 - [ ] 高级设置里关闭某个端点（如 gemini），导入后 magpie 中该端点为空
 - [ ] 打开一个只适配部分端点的站点，确认未适配的端点被自动取消勾选并标注「未检测到」
+- [ ] 高级设置里「配置余额查询」显示本站余额接口地址（new-api 为 `/api/usage/token`，sub2api 为 `/v1/usage`）
+- [ ] 用「批量命令」导入后，magpie 的 provider 卡片上出现余额
+- [ ] sub2api 站导入后，magpie 里该 provider 的模型列表不为空
+- [ ] 站点在后台设了自己的 logo 时，magpie 里 provider 显示的是站点 logo 而非面板默认图标
 
 ## 友情链接
 

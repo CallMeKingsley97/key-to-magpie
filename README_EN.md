@@ -2,11 +2,11 @@
 
 [简体中文](./README.md) | English
 
-A Chrome extension that adds an "Import to magpie" button on the token management pages of [new-api](https://github.com/QuantumNous/new-api) / [sub2api](https://github.com/Wei-Shaw/sub2api), letting you import your API Keys as providers with one click via the official [magpie](https://github.com/yetone/magpie) import protocol (`magpie://import` links).
+A Chrome and Microsoft Edge (Chromium 111+) extension that adds an "Import to magpie" button on the token management pages of [new-api](https://github.com/QuantumNous/new-api) / [sub2api](https://github.com/Wei-Shaw/sub2api), letting you import your API Keys as providers with one click via the official [magpie](https://github.com/yetone/magpie) import protocol (`magpie://import` links).
 
 ## Installation
 
-1. Open Chrome and go to `chrome://extensions`
+1. Open `chrome://extensions` in Chrome or `edge://extensions` in Microsoft Edge
 2. Enable "Developer mode" in the top-right corner
 3. Click "Load unpacked" and select this directory (`key-to-magpie/`)
 4. Make sure the magpie desktop app is installed and has been launched at least once (`/Applications/magpie.app`)
@@ -33,8 +33,37 @@ A Chrome extension that adds an "Import to magpie" button on the token managemen
 | anthropic | `https://station` (for Claude Code) |
 | gemini | `https://station/v1beta` |
 | key | plaintext token key (fetched via the station's API, passed only locally) |
-| models | the token's "model restriction" list in new-api (empty if unrestricted) |
+| models | the token's "model restriction" list in new-api; for sub2api, fetched from `/v1/models` with the plaintext key (empty if unrestricted) |
 | catalog / website / keys | auto-completed (models.dev, station homepage, token page URL) |
+| icon | the logo the station configured in its public API (see below) |
+
+### Icon
+
+`icon` prefers the logo the station itself configured in its public API
+(new-api's `/api/status` → `logo`, sub2api's `/api/v1/settings/public` →
+`site_logo`), falling back to the page favicon only when there is none.
+
+magpie validates `icon` strictly (https, public host, no credentials or
+fragment); a value that fails makes the whole import link invalid, so the
+extension filters first. If nothing survives filtering, the parameter is left
+out and magpie uses its own letter tile or the catalog's logo — better than
+passing the panel favicon that looks identical on every relay.
+
+### Balance
+
+magpie has built-in balance queries for new-api and sub2api, but
+`magpie://import` has no `balance` parameter — it can only be added afterwards
+via the CLI. With "Advanced settings → configure balance query in batch
+command" checked, each key in "Batch command" gains an extra line:
+
+```sh
+magpie provider set '<id>' balance='https://station/api/usage/token'
+```
+
+magpie infers the value field from the endpoint path (new-api's
+`/api/usage/token`, sub2api's `/v1/usage`), so the URL alone is enough. This
+switch only affects "Batch command", since single imports go through the GUI
+where there is no command to run.
 
 ### Endpoint Probing
 
@@ -56,6 +85,8 @@ of the four endpoints; preferences are remembered per station.
 ## Security Notes
 
 - The extension only sends same-origin requests within the current site to read the token list and plaintext keys — no third-party servers involved
+- Authentication is read and refreshed in the token page's own context; tokens are only used for requests to that site
+- On sub2api stations it calls the station's own `/v1/models` with the plaintext key to fetch the model list — also a same-origin request
 - Keys only appear in magpie import links; the link is cleared from the address bar immediately after the extension page opens
 - After receiving a link, magpie shows a confirmation dialog first — the provider is only written to `~/.config/magpie/providers.json` after you click Add
 - The extension requests no host permissions and only activates on matched token page paths
@@ -63,6 +94,7 @@ of the four endpoints; preferences are remembered per station.
 ## Manual Test Checklist
 
 - [ ] Load this directory via `chrome://extensions` with no errors
+- [ ] Load it via `edge://extensions`, refresh a signed-in token page, and confirm the panel lists tokens
 - [ ] Open `https://api.chengmo.cc.cd/keys` (new-api) and confirm the "Import to magpie" button appears
 - [ ] Click the button and confirm the panel lists all tokens in the account
 - [ ] Import a single key → magpie shows a confirmation window with correct host / key / models → click Add
@@ -71,6 +103,10 @@ of the four endpoints; preferences are remembered per station.
 - [ ] (Optional) repeat the above on a sub2api station's `/keys` page
 - [ ] Disable an endpoint (e.g. gemini) in advanced settings → that endpoint is empty after import
 - [ ] Open a station that only supports some endpoints, confirm unsupported endpoints are unchecked automatically and marked "not detected"
+- [ ] "Configure balance query" in advanced settings shows this station's balance endpoint (new-api: `/api/usage/token`, sub2api: `/v1/usage`)
+- [ ] After importing via "Batch command", the provider card in magpie shows a balance
+- [ ] After importing from a sub2api station, that provider's model list in magpie is not empty
+- [ ] When the station configured its own logo, magpie shows that logo rather than the panel's default icon
 
 ## Friendly Links
 
