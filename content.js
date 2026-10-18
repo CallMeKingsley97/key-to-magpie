@@ -378,7 +378,6 @@
 
   function ensureFloatingButton() {
     if (document.querySelector('[data-ktm="floating"]')) return;
-    if (!findCreateButton()) return;
     document.documentElement.append(makeFloatingButton());
   }
 
