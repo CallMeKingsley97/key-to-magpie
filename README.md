@@ -84,7 +84,7 @@ sub2api 的 `/v1/usage`），所以只需要给 URL。这个开关只影响「�
 - sub2api 站会用明文 key 调本站的 `/v1/models` 取模型列表，同样是同源请求
 - key 只出现在 magpie 导入链接里；链接在扩展内页打开后立即从地址栏清除
 - magpie 收到链接后会先显示确认弹窗，你点 Add 才会写入 `~/.config/magpie/providers.json`
-- 插件不申请任何 host 权限，只在匹配的令牌页路径下激活
+- 为兼容登录后通过 SPA 切换到令牌页，插件会轻量检查 HTTP(S) 页面的 URL；只有进入令牌页路径后才扫描页面内容、显示按钮或请求站点 API
 
 ## 手动测试清单
 
@@ -111,7 +111,7 @@ sub2api 的 `/v1/usage`），所以只需要给 URL。这个开关只影响「�
 ## 文件结构
 
 ```
-manifest.json   扩展配置（MV3，无 host 权限）
+manifest.json   扩展配置（MV3，在 HTTP(S) 页面检查 SPA 路由）
 content.js      页面脚本：注入按钮、读取令牌、生成导入链接、导入队列
 background.js   service worker：打开/复用导入页标签
 open.html/js    扩展内导入页：唤起 magpie 协议 + 兜底说明

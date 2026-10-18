@@ -1,6 +1,11 @@
 'use strict';
 
 (() => {
+  const isTokenPage = () =>
+    !/^\/(oauth|login|sign-?in|callback|auth)/i.test(location.pathname) &&
+    (/(^|\/)(keys?|tokens?|api-keys)(\/|$)/i.test(location.pathname) ||
+      /\/console\/(token|keys)(\/|$)/i.test(location.pathname));
+
   window.addEventListener('message', async (event) => {
     const message = event.data;
     if (
@@ -10,6 +15,7 @@
       message.source !== 'KTM_PAGE_AUTH_REQUEST' ||
       typeof message.requestId !== 'string'
     ) return;
+    if (!isTokenPage()) return;
 
     const prefix = typeof message.prefix === 'string' ? message.prefix : '';
     if (prefix && (!prefix.startsWith('/') || prefix.startsWith('//') || /[?#]/.test(prefix))) return;

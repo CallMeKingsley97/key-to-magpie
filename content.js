@@ -259,6 +259,18 @@
   // 页面识别与注入
   // ---------------------------------------------------------------------------
 
+  function makeMagpieIcon(size) {
+    const icon = document.createElement('img');
+    icon.src = chrome.runtime.getURL('icons/magpie.svg');
+    icon.width = size;
+    icon.height = size;
+    icon.alt = '';
+    icon.draggable = false;
+    icon.setAttribute('aria-hidden', 'true');
+    icon.style.cssText = `width:${size}px;height:${size}px;object-fit:contain;filter:brightness(0) invert(1);flex:none`;
+    return icon;
+  }
+
   function isTokenPage() {
     const path = location.pathname;
     if (/^\/(oauth|login|sign-?in|callback|auth)/i.test(path)) return false;
@@ -310,11 +322,7 @@
       'white-space:nowrap',
       'user-select:none',
     ].join(';');
-    btn.innerHTML =
-      '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-      '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>' +
-      '<path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>' +
-      '</svg><span>导入到 magpie</span>';
+    btn.append(makeMagpieIcon(18), h('span', { text: '导入到 magpie' }));
     btn.addEventListener('mouseenter', () => {
       btn.style.transform = 'translateY(-1px)';
       btn.style.filter = 'brightness(1.06)';
@@ -337,7 +345,7 @@
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.dataset.ktm = 'floating';
-    btn.textContent = '导入到 magpie';
+    btn.append(makeMagpieIcon(20), h('span', { text: '导入到 magpie' }));
     btn.style.cssText = [
       'all:unset',
       'box-sizing:border-box',
@@ -2389,75 +2397,82 @@
   // 全局事件与启动
   // ---------------------------------------------------------------------------
 
-  document.addEventListener(
-    'keydown',
-    (event) => {
-      if (event.key !== 'Escape') return;
-      if (state.batchOpen) {
-        state.batchOpen = false;
-        renderAll();
-      } else if (state.dialogOpen) {
-        closeDialog();
+  let started = false;
+
+  function startOnTokenPage() {
+    if (started) return;
+    started = true;
+
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.key !== 'Escape') return;
+        if (state.batchOpen) {
+          state.batchOpen = false;
+          renderAll();
+        } else if (state.dialogOpen) {
+          closeDialog();
+        }
+      },
+      true
+    );
+
+    document.addEventListener(
+      'keydown',
+      (event) => {
+        if (event.key !== 'Tab' || !state.dialogOpen) return;
+        const focusables = Array.from(
+          state.shadow.querySelectorAll(
+            'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], summary'
+          )
+        ).filter((el) => el.offsetParent !== null || el.getClientRects().length > 0);
+        if (!focusables.length) return;
+        const first = focusables[0];
+        const last = focusables[focusables.length - 1];
+        const active = state.shadow.activeElement;
+        if (event.shiftKey && active === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && active === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      },
+      true
+    );
+
+    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+      if (message && message.type === 'KTM_OPEN_PANEL') {
+        openDialog();
+        sendResponse({ ok: true });
       }
-    },
-    true
-  );
+      return false;
+    });
 
-  // 简单的焦点循环：对话框打开时 Tab 不跑出卡片。
-  document.addEventListener(
-    'keydown',
-    (event) => {
-      if (event.key !== 'Tab' || !state.dialogOpen) return;
-      const focusables = Array.from(
-        state.shadow.querySelectorAll(
-          'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], summary'
-        )
-      ).filter((el) => el.offsetParent !== null || el.getClientRects().length > 0);
-      if (!focusables.length) return;
-      const first = focusables[0];
-      const last = focusables[focusables.length - 1];
-      const active = state.shadow.activeElement;
-      if (event.shiftKey && active === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && active === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    },
-    true
-  );
-
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message && message.type === 'KTM_OPEN_PANEL') {
-      openDialog();
-      sendResponse({ ok: true });
-    }
-    return false;
-  });
-
-  // SPA 路由变化后重新注入。
-  let lastHref = location.href;
-  setInterval(() => {
-    if (location.href !== lastHref) {
-      lastHref = location.href;
-      if (state.dialogOpen) closeDialog();
+    const observer = new MutationObserver(() => scheduleInject());
+    const startObserving = () => {
+      if (!document.body) return;
+      observer.observe(document.body, { childList: true, subtree: true });
       scheduleInject();
+    };
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', startObserving, { once: true });
+    } else {
+      startObserving();
     }
-  }, 1200);
 
-  const observer = new MutationObserver(() => scheduleInject());
-  const startObserving = () => {
-    if (!document.body) return;
-    observer.observe(document.body, { childList: true, subtree: true });
-    scheduleInject();
-  };
-
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', startObserving, { once: true });
-  } else {
-    startObserving();
+    setInterval(injectUi, 2500);
   }
 
-  setInterval(injectUi, 2500);
+  let lastHref = location.href;
+  if (isTokenPage()) startOnTokenPage();
+
+  setInterval(() => {
+    if (location.href === lastHref) return;
+    lastHref = location.href;
+    if (state.dialogOpen) closeDialog();
+    if (isTokenPage()) startOnTokenPage();
+    if (started) scheduleInject();
+  }, 1200);
 })();

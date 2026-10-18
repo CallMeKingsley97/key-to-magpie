@@ -89,7 +89,7 @@ of the four endpoints; preferences are remembered per station.
 - On sub2api stations it calls the station's own `/v1/models` with the plaintext key to fetch the model list — also a same-origin request
 - Keys only appear in magpie import links; the link is cleared from the address bar immediately after the extension page opens
 - After receiving a link, magpie shows a confirmation dialog first — the provider is only written to `~/.config/magpie/providers.json` after you click Add
-- The extension requests no host permissions and only activates on matched token page paths
+- To detect SPA navigation after login, the extension runs a lightweight URL check on HTTP(S) pages; it scans page content, shows UI, and calls station APIs only on supported token-page paths
 
 ## Manual Test Checklist
 
@@ -116,7 +116,7 @@ of the four endpoints; preferences are remembered per station.
 ## File Structure
 
 ```
-manifest.json   Extension config (MV3, no host permissions)
+manifest.json   Extension config (MV3, checks SPA routes on HTTP(S) pages)
 content.js      Page script: injects button, reads tokens, builds import links, import queue
 background.js   Service worker: opens/reuses the import page tab
 open.html/js    In-extension import page: invokes the magpie protocol + fallback notes
