@@ -793,6 +793,10 @@
 
   async function newApiFetch(ctx, url, options = {}, retry = true) {
     const headers = { ...(options.headers || {}) };
+    try {
+      const userId = localStorage.getItem('uid') || '';
+      if (/^[1-9]\d*$/.test(userId)) headers['New-Api-User'] = userId;
+    } catch {}
     if (state.newApiToken) headers.Authorization = 'Bearer ' + state.newApiToken;
 
     const response = await fetchWithTimeout(url, { ...options, headers });
