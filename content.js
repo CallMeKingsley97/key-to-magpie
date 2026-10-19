@@ -25,6 +25,7 @@
   const PAGE_SIZE = 100;
   const MAX_TOKENS = 1000;
   const FETCH_TIMEOUT = 15000;
+  const PROBE_TIMEOUT = 1000;
   const MAX_NAME_BYTES = 80;
   const MAX_MODELS = 200;
 
@@ -67,6 +68,9 @@
     probeDetails: {},
     probeMessage: '',
     probing: false,
+    probeController: null,
+    endpointSelectionTouched: false,
+    endpointInputs: {},
     /** @type {{name:string,id:string,link:string,token:Token}[]} */
     queue: [],
     queueIndex: 0,
@@ -564,7 +568,7 @@
    * /v1/messages、openai /v1/chat/completions 等）。不存在的端点导入后
    * magpie 里对话会 404，所以这里按 New API 文档发最小有效请求：
    * 使用一个已启用令牌的 API Key；不同协议使用各自要求的认证头。
-   *   - 404 / 405 / 501 → 端点不存在，标记 missing（默认取消勾选）
+   *   - 404 / 405 / 501 → 端点不存在，标记 missing（完整探测后默认取消勾选）
    *   - 401 / 403 → Key 认证失败或无权限，不视为端点已确认
    *   - 2xx → 端点响应成功，标记 ok
    *   - 其他 4xx（除 401 / 403）→ 请求被拒绝，无法确认端点可用
@@ -580,49 +584,93 @@
     return 'unknown';
   }
 
-  async function probeEndpoints(ctx) {
+  async function runProbeRequest(controller, run) {
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, PROBE_TIMEOUT);
+    try {
+      const value = await run(controller.signal);
+      return { value, timedOut };
+    } catch (error) {
+      return { error, timedOut };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function fetchProbeStatus(url, options) {
+    const response = await fetch(url, options);
+    const result = { status: response.status, ok: response.ok };
+    try {
+      await response.body?.cancel();
+    } catch {}
+    return result;
+  }
+
+  async function probeEndpoints(ctx, controller) {
     const result = {};
     const details = {};
     const urls = ctx.endpointUrls;
+    const signal = controller.signal;
     const token = state.tokens.find((item) => item.enabled);
     if (!token) {
-      return { statuses: result, details, message: '没有启用的 API Key，未执行端点探测。' };
+      return { statuses: result, details, message: '没有启用的 API Key，未执行端点探测。', complete: false };
     }
 
     let apiKey = '';
     try {
-      const resolved = await resolveKeys([token], false);
+      const resolved = await resolveKeys([token], false, signal);
       apiKey = resolved.map.get(token.id) || '';
     } catch {
       /* 未能读取 Key 时跳过探测，避免发送无认证请求 */
     }
+    if (signal.aborted) return { cancelled: true };
     if (!apiKey) {
-      return { statuses: result, details, message: '未能读取已启用令牌的 API Key，未执行端点探测。' };
+      return {
+        statuses: result,
+        details,
+        message: '未能读取已启用令牌的 API Key，未执行端点探测。',
+        complete: false,
+      };
     }
 
     const bearer = { Authorization: `Bearer ${apiKey}` };
     const contentType = { 'Content-Type': 'application/json' };
     const modelResult = { model: '', status: 'unknown' };
-    try {
-      const res = await fetchWithTimeout(
-        ctx.openaiBase + '/models',
-        { headers: bearer },
-        8000
-      );
+    const modelRequest = await runProbeRequest(controller, async (requestSignal) => {
+      const res = await fetch(ctx.openaiBase + '/models', {
+        credentials: 'include',
+        headers: bearer,
+        signal: requestSignal,
+      });
       modelResult.status = classifyProbeStatus(res.status);
       if (res.ok) {
         const json = await safeJson(res);
+        if (requestSignal.aborted) return;
         const rows = json && Array.isArray(json.data) ? json.data : [];
         const firstModel = rows.find((row) => row && typeof row.id === 'string' && row.id.trim());
         if (firstModel) modelResult.model = firstModel.id.trim();
       } else {
-        details.models = await describeProbeFailure(res, apiKey);
+        details.models = `HTTP ${res.status}`;
       }
-    } catch {
+    });
+    if (signal.aborted && !modelRequest.timedOut) return { cancelled: true };
+    if (modelRequest.error || modelRequest.timedOut) {
       modelResult.status = 'unknown';
-      details.models = '网络错误或请求超时';
+      details.models = modelRequest.timedOut ? '超过 1 秒未响应，已停止后续探测' : '网络错误';
     }
     result.models = modelResult.status;
+
+    if (modelRequest.timedOut) {
+      return {
+        statuses: {},
+        details: { models: '超过 1 秒未响应，已停止后续探测' },
+        message: '单个请求超过 1 秒，已停止后续探测；不影响导入。',
+        complete: false,
+      };
+    }
 
     const model =
       modelResult.model ||
@@ -637,14 +685,16 @@
         statuses: result,
         details,
         message: '未能从 /v1/models 或令牌限制中取得可用模型，未发送模型探测请求。',
+        complete: false,
       };
     }
 
     const checks = [
       {
         key: 'chat',
-        run: () =>
-          fetchWithTimeout(urls.chat, {
+        run: (requestSignal) =>
+          fetchProbeStatus(urls.chat, {
+            credentials: 'include',
             method: 'POST',
             headers: { ...contentType, ...bearer },
             body: JSON.stringify({
@@ -652,21 +702,25 @@
               messages: [{ role: 'user', content: 'Reply with 1.' }],
               max_tokens: 1,
             }),
+            signal: requestSignal,
           }),
       },
       {
         key: 'responses',
-        run: () =>
-          fetchWithTimeout(urls.responses, {
+        run: (requestSignal) =>
+          fetchProbeStatus(urls.responses, {
+            credentials: 'include',
             method: 'POST',
             headers: { ...contentType, ...bearer },
             body: JSON.stringify({ model, input: 'Reply with 1.', max_output_tokens: 1, store: false }),
+            signal: requestSignal,
           }),
       },
       {
         key: 'anthropic',
-        run: () =>
-          fetchWithTimeout(urls.anthropic, {
+        run: (requestSignal) =>
+          fetchProbeStatus(urls.anthropic, {
+            credentials: 'include',
             method: 'POST',
             headers: {
               ...contentType,
@@ -678,50 +732,55 @@
               max_tokens: 1,
               messages: [{ role: 'user', content: 'Reply with 1.' }],
             }),
+            signal: requestSignal,
           }),
       },
     ];
 
-    await Promise.all(
-      checks.map(async ({ key, run }) => {
-        try {
-          const res = await run();
-          result[key] = classifyProbeStatus(res.status);
-          if (!res.ok) details[key] = await describeProbeFailure(res, apiKey);
-        } catch {
-          // 探测失败不影响使用，只是无法给出提示
-          result[key] = 'unknown';
-          details[key] = '网络错误或请求超时';
-        }
-      })
-    );
+    for (let index = 0; index < checks.length; index += 1) {
+      const { key, run } = checks[index];
+      const request = await runProbeRequest(controller, run);
+      if (signal.aborted && !request.timedOut) return { cancelled: true };
+      if (request.error || request.timedOut) {
+        result[key] = 'unknown';
+        details[key] = request.timedOut ? '超过 1 秒未响应，已停止后续探测' : '网络错误';
+      } else {
+        result[key] = classifyProbeStatus(request.value.status);
+        if (!request.value.ok) details[key] = `HTTP ${request.value.status}`;
+      }
+      if (request.timedOut) {
+        return {
+          statuses: {},
+          details: { [key]: '超过 1 秒未响应，已停止后续探测' },
+          message: '单个请求超过 1 秒，已停止后续探测；不影响导入。',
+          complete: false,
+        };
+      }
+    }
 
     result.gemini = 'skipped';
     return {
       statuses: result,
       details,
-      message: '为避免重复请求模型列表，本次未单独探测 Gemini；可在高级设置中手动启用或关闭。',
+      message: '已按顺序完成端点探测。为避免重复请求模型列表，本次未单独探测 Gemini。',
+      complete: true,
     };
-  }
-
-  async function describeProbeFailure(response, apiKey) {
-    const body = await safeJson(response.clone());
-    const error = body && body.error;
-    const message =
-      (error && typeof error.message === 'string' && error.message) ||
-      (typeof body?.message === 'string' && body.message) ||
-      '';
-    const safeMessage = message.replaceAll(apiKey, '[已隐藏]').replace(/\s+/g, ' ').slice(0, 180);
-    return `HTTP ${response.status}${safeMessage ? `：${safeMessage}` : ''}`;
   }
 
   async function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
+    const upstreamSignal = options.signal;
+    const abortFromUpstream = () => controller.abort();
+    if (upstreamSignal) {
+      if (upstreamSignal.aborted) controller.abort();
+      else upstreamSignal.addEventListener('abort', abortFromUpstream, { once: true });
+    }
     try {
       return await fetch(url, { credentials: 'include', ...options, signal: controller.signal });
     } finally {
       clearTimeout(timer);
+      upstreamSignal?.removeEventListener('abort', abortFromUpstream);
     }
   }
 
@@ -920,16 +979,17 @@
     if (state.newApiToken) headers.Authorization = 'Bearer ' + state.newApiToken;
 
     const response = await fetchWithTimeout(url, { ...options, headers });
-    if (response.status === 401 && retry) {
+    if (response.status === 401 && retry && !options.signal?.aborted) {
       state.newApiToken = '';
       const token = await refreshNewApi(ctx);
-      if (token) return newApiFetch(ctx, url, options, false);
+      if (token && !options.signal?.aborted) return newApiFetch(ctx, url, options, false);
     }
     return response;
   }
 
-  async function newApiPost(ctx, url, body) {
+  async function newApiPost(ctx, url, body, options = {}) {
     return newApiFetch(ctx, url, {
+      ...options,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {}),
@@ -1226,7 +1286,7 @@
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
   }
 
-  async function resolveKeys(tokens, fetchModels = true) {
+  async function resolveKeys(tokens, fetchModels = true, signal = null) {
     const map = new Map();
     const failures = [];
 
@@ -1248,9 +1308,12 @@
     // new-api：先试批量接口，再逐个回退。
     const missing = tokens.map((token) => token.id);
     try {
-      const res = await newApiPost(state.ctx, state.ctx.prefix + '/api/token/batch/keys', {
-        ids: missing,
-      });
+      const res = await newApiPost(
+        state.ctx,
+        state.ctx.prefix + '/api/token/batch/keys',
+        { ids: missing },
+        { signal }
+      );
       if (res.ok) {
         const json = await safeJson(res);
         const data = json && json.data;
@@ -1276,8 +1339,10 @@
     } catch {
       /* 批量接口不可用时逐个读取 */
     }
+    if (signal?.aborted) return { map, failures };
 
     for (const token of tokens) {
+      if (signal?.aborted) break;
       if (map.has(token.id)) continue;
       if (state.keyCache.has(token.id)) {
         map.set(token.id, state.keyCache.get(token.id));
@@ -1287,8 +1352,9 @@
       // 单个 key 读取失败时重试两次（网络错误或 5xx）。
       let ok = false;
       for (let attempt = 0; attempt < 3 && !ok; attempt += 1) {
+        if (signal?.aborted) break;
         try {
-          const res = await newApiPost(state.ctx, url, {});
+          const res = await newApiPost(state.ctx, url, {}, { signal });
           const json = await safeJson(res);
           const key = res.ok && json && json.data && json.data.key;
           if (typeof key === 'string' && key.trim()) {
@@ -1447,6 +1513,13 @@
     state.shadow = state.host.attachShadow({ mode: 'open' });
   }
 
+  function cancelEndpointProbe() {
+    const controller = state.probeController;
+    state.probeController = null;
+    state.probing = false;
+    if (controller && !controller.signal.aborted) controller.abort();
+  }
+
   async function loadPrefs(ctx) {
     const key = PREF_PREFIX + ctx.host + ctx.prefix;
     const stored = await storageGet(key);
@@ -1462,19 +1535,23 @@
     // 探测站点支持的端点：missing 的端点默认不勾选。
     // 用户手动改过端点偏好（prefs.endpoints 存在）时尊重用户选择。
     const userConfigured = Boolean(prefs.endpoints);
+    cancelEndpointProbe();
+    const controller = new AbortController();
+    state.probeController = controller;
     state.probing = true;
-    probeEndpoints(ctx)
-      .then(({ statuses, details, message }) => {
+    probeEndpoints(ctx, controller)
+      .then(({ statuses, details, message, complete, cancelled }) => {
         // 面板可能已被关闭或切换了站点
-        if (state.ctx !== ctx) return;
+        if (state.ctx !== ctx || state.probeController !== controller || cancelled) return;
         state.probe = statuses;
         state.probeDetails = details;
         state.probeMessage = message;
-        if (!userConfigured) {
+        if (!userConfigured && !state.endpointSelectionTouched && complete) {
           for (const key of Object.keys(DEFAULT_ENDPOINTS)) {
             if (statuses[key] === 'missing' || statuses[key] === 'forbidden') {
               state.endpoints[key] = false;
             }
+            if (state.endpointInputs[key]) state.endpointInputs[key].checked = state.endpoints[key];
           }
         }
         if (state.dialogOpen) {
@@ -1484,7 +1561,9 @@
         }
       })
       .finally(() => {
-        if (state.ctx === ctx) state.probing = false;
+        if (state.probeController !== controller) return;
+        state.probeController = null;
+        state.probing = false;
         if (state.dialogOpen) {
           updateEndpointSummary();
           updateFooter();
@@ -1513,6 +1592,7 @@
     // 出错时允许重试：只有「已打开且无错误」才直接返回。
     if (state.dialogOpen && !state.error) return;
 
+    cancelEndpointProbe();
     state.dialogOpen = true;
     state.loading = true;
     state.busy = false;
@@ -1526,6 +1606,8 @@
     state.probeDetails = {};
     state.probeMessage = '';
     state.probing = false;
+    state.endpointSelectionTouched = false;
+    state.endpointInputs = {};
     ensureHost();
     renderAll();
 
@@ -1551,6 +1633,7 @@
   }
 
   function closeDialog(clear = true) {
+    cancelEndpointProbe();
     state.dialogOpen = false;
     state.error = '';
     state.busy = false;
@@ -1559,6 +1642,7 @@
     state.selectAllBtn = null;
     state.importBtn = null;
     state.endpointSummaryEl = null;
+    state.endpointInputs = {};
     state.balanceHintEl = null;
     if (clear && !state.queue.length) {
       state.tokens = [];
@@ -1917,6 +2001,7 @@
       updateBalanceHint();
 
       const endpoints = h('div', { class: 'ktm-endpoints' });
+      state.endpointInputs = {};
       const endpointLabels = {
         chat: 'OpenAI Chat',
         responses: 'OpenAI Responses',
@@ -1936,7 +2021,9 @@
           type: 'checkbox',
           checked: state.endpoints[key],
         });
+        state.endpointInputs[key] = checkbox;
         checkbox.addEventListener('change', () => {
+          state.endpointSelectionTouched = true;
           state.endpoints[key] = checkbox.checked;
           savePrefs();
           updateEndpointSummary();
@@ -2083,7 +2170,7 @@
     const failures = Object.entries(state.probeDetails).map(([key, detail]) => `${probeNames[key]}：${detail}`);
     if (failures.length) hints.push({ text: failures.join('；'), kind: 'note' });
     if (state.probeMessage) hints.push({ text: state.probeMessage, kind: 'note' });
-    if (state.probing) hints.push({ text: '正在探测站点支持的端点…', kind: 'note' });
+    if (state.probing) hints.push({ text: '正在依次探测（单请求最多 1 秒，可直接导入）…', kind: 'note' });
     state.endpointSummaryEl.replaceChildren(
       h('div', { class: 'ktm-preview-title' }, '将写入 magpie 的端点'),
       ...rows.map((row) => h('code', { class: 'ktm-preview-row' }, row)),
@@ -2095,6 +2182,7 @@
 
   async function doImport() {
     if (state.busy || !state.ctx) return;
+    cancelEndpointProbe();
     const selected = state.tokens.filter((token) => state.selected.has(token.id));
     if (!selected.length) return;
 
