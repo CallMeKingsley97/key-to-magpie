@@ -2566,7 +2566,7 @@
     }
     .ktm-probe.ok { color: var(--ktm-ok); background: color-mix(in srgb, var(--ktm-ok) 10%, transparent); }
     .ktm-probe.missing { color: var(--ktm-bad); background: color-mix(in srgb, var(--ktm-bad) 10%, transparent); }
-    .ktm-probe.auth, .ktm-probe.forbidden, .ktm-probe.unknown { color: var(--ktm-muted); background: var(--ktm-soft); }
+    .ktm-probe.auth, .ktm-probe.forbidden, .ktm-probe.unknown, .ktm-probe.skipped { color: var(--ktm-muted); background: var(--ktm-soft); }
     .ktm-hint {
       font-size: 11px; font-weight: 400; color: var(--ktm-muted);
       max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
