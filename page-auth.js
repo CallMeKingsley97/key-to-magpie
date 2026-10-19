@@ -1,10 +1,63 @@
 'use strict';
 
 (() => {
+  let newApiAccessToken = '';
+  let newApiUserId = '';
+
   const isTokenPage = () =>
     !/^\/(oauth|login|sign-?in|callback|auth)/i.test(location.pathname) &&
     (/(^|\/)(keys?|tokens?|api-keys)(\/|$)/i.test(location.pathname) ||
       /\/console\/(token|keys)(\/|$)/i.test(location.pathname));
+
+  const isNewApiManagementRequest = (requestUrl) => {
+    try {
+      const url = new URL(requestUrl, location.href);
+      return url.origin === location.origin && /^\/api\/(user|token)(\/|$)/i.test(url.pathname);
+    } catch {
+      return false;
+    }
+  };
+
+  const captureNewApiHeaders = (headers) => {
+    const authorization = headers.get('Authorization') || '';
+    const accessToken = authorization.match(/^Bearer\s+(.+)$/i);
+    if (accessToken) newApiAccessToken = accessToken[1].trim();
+
+    const userId = headers.get('New-Api-User') || '';
+    if (/^[1-9]\d*$/.test(userId)) newApiUserId = userId;
+  };
+
+  const originalXhrOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, requestUrl) {
+    this.__ktmCaptureNewApiAuth = isTokenPage() && isNewApiManagementRequest(requestUrl);
+    return originalXhrOpen.apply(this, arguments);
+  };
+
+  const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+    if (this.__ktmCaptureNewApiAuth) {
+      const headerName = String(name).toLowerCase();
+      const headerValue = String(value);
+      if (headerName === 'authorization' && /^Bearer\s+/i.test(headerValue)) {
+        newApiAccessToken = headerValue.replace(/^Bearer\s+/i, '').trim();
+      } else if (headerName === 'new-api-user' && /^[1-9]\d*$/.test(headerValue)) {
+        newApiUserId = headerValue;
+      }
+    }
+    return originalSetRequestHeader.apply(this, arguments);
+  };
+
+  const originalFetch = window.fetch;
+  window.fetch = function (input, init) {
+    const requestUrl = typeof input === 'string' ? input : input && input.url ? input.url : String(input);
+    if (isTokenPage() && isNewApiManagementRequest(requestUrl)) {
+      try {
+        const headers = new Headers((init && init.headers) || (input && input.headers) || {});
+        captureNewApiHeaders(headers);
+      } catch {}
+    }
+    return originalFetch.apply(this, arguments);
+  };
 
   window.addEventListener('message', async (event) => {
     const message = event.data;
@@ -25,6 +78,8 @@
     try {
       if (message.operation === 'sub2api.read') {
         data = { accessToken: localStorage.getItem('auth_token') || '' };
+      } else if (message.operation === 'newapi.read') {
+        data = { accessToken: newApiAccessToken, userId: newApiUserId };
       } else if (message.operation === 'sub2api.refresh') {
         const refreshToken = localStorage.getItem('refresh_token') || '';
         if (!refreshToken) {

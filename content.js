@@ -75,6 +75,7 @@
     batchText: '',
     keyCache: new Map(),
     newApiToken: '',
+    newApiUserId: '',
     refreshPromise: null,
     subRefreshPromise: null,
     authError: '',
@@ -795,8 +796,9 @@
     const headers = { ...(options.headers || {}) };
     try {
       const userId = localStorage.getItem('uid') || '';
-      if (/^[1-9]\d*$/.test(userId)) headers['New-Api-User'] = userId;
+      if (/^[1-9]\d*$/.test(userId)) state.newApiUserId = userId;
     } catch {}
+    if (state.newApiUserId) headers['New-Api-User'] = state.newApiUserId;
     if (state.newApiToken) headers.Authorization = 'Bearer ' + state.newApiToken;
 
     const response = await fetchWithTimeout(url, { ...options, headers });
@@ -990,6 +992,12 @@
   }
 
   async function loadNewApiTokens(ctx) {
+    try {
+      const auth = await runPageAuthOperation('newapi.read');
+      if (typeof auth.accessToken === 'string') state.newApiToken = auth.accessToken;
+      if (/^[1-9]\d*$/.test(String(auth.userId || ''))) state.newApiUserId = String(auth.userId);
+    } catch {}
+
     const all = [];
     let total = Infinity;
     let startPage = 1;
