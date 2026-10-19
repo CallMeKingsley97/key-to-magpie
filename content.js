@@ -37,6 +37,10 @@
 
   const CREATE_BUTTON_RE =
     /(添加令牌|新增令牌|创建令牌|新建令牌|添加\s*API\s*密钥|新增\s*API\s*密钥|创建\s*API\s*密钥|新建\s*API\s*密钥|添加密钥|新增密钥|创建密钥|新建密钥|Create\s+API\s+Key|Add\s+API\s+Key|New\s+API\s+Key|Create\s+Token|Add\s+Token|New\s+Token|Create\s+Key|Add\s+Key)/i;
+  const COPY_KEY_RE =
+    /(?:copy|复制|複製).{0,16}(?:api\s*)?(?:key|token|secret|密钥|密鑰|令牌)|(?:api\s*)?(?:key|token|secret|密钥|密鑰|令牌)\s*(?:copy|复制|複製)/i;
+  const GENERIC_COPY_RE = /^(?:copy(?:\s+to clipboard)?|复制(?:到剪贴板)?|複製(?:到剪貼簿)?)$/i;
+  const KEY_COLUMN_RE = /(?:api\s*)?(?:key|token|secret)|密钥|密鑰|令牌/i;
 
   // ---------------------------------------------------------------------------
   // 状态
@@ -83,6 +87,8 @@
     host: null,
     shadow: null,
     dialogOpen: false,
+    copyPromptOpen: false,
+    copyPromptTrigger: null,
     listEl: null,
     countEl: null,
     selectAllBtn: null,
@@ -279,6 +285,82 @@
       /(^|\/)(keys?|tokens?|api-keys)(\/|$)/i.test(path) ||
       /\/console\/(token|keys)(\/|$)/i.test(path)
     );
+  }
+
+  function findKeyCopyButton(target) {
+    if (!(target instanceof Element)) return null;
+    const button = target.closest('button, [role="button"], a[role="button"]');
+    if (!button || button.closest('#' + ROOT_ID)) return null;
+
+    const labels = [
+      button.getAttribute('aria-label'),
+      button.getAttribute('title'),
+      button.getAttribute('data-tooltip'),
+      button.getAttribute('data-tooltip-content'),
+      button.getAttribute('data-original-title'),
+      button.getAttribute('data-title'),
+      button.textContent,
+    ]
+      .filter(Boolean)
+      .map((label) => label.trim())
+      .filter(Boolean);
+    if (labels.some((label) => COPY_KEY_RE.test(label))) return button;
+
+    const isGenericCopy = labels.some((label) => GENERIC_COPY_RE.test(label));
+    const row = button.closest('tr, [role="row"]');
+    if (isGenericCopy && row) return button;
+    if (!row) return null;
+
+    const cell = button.closest('td, [role="cell"], [role="gridcell"]');
+    if (!cell) return null;
+
+    const isIconOnly =
+      !button.textContent.trim() &&
+      !button.getAttribute('aria-label') &&
+      !button.getAttribute('title') &&
+      Boolean(button.querySelector('svg, img, [class*="icon"], [data-icon]'));
+    if (!isIconOnly) return null;
+
+    const table = row.closest('table, [role="table"], [role="grid"]');
+    if (table) {
+      const rowCells = Array.from(row.children).filter((child) =>
+        child.matches('td, [role="cell"], [role="gridcell"]')
+      );
+      const cellIndex = rowCells.indexOf(cell);
+      const headers = Array.from(
+        table.querySelectorAll('thead th, thead [role="columnheader"], [role="columnheader"]')
+      );
+      if (cellIndex >= 0 && headers[cellIndex] && KEY_COLUMN_RE.test(headers[cellIndex].textContent)) {
+        return button;
+      }
+    }
+
+    return null;
+  }
+
+  function requestMagpieImportAfterCopy(button) {
+    if (state.copyPromptOpen) return;
+    state.copyPromptTrigger = button;
+    setTimeout(() => {
+      if (!isTokenPage() || state.copyPromptOpen) {
+        if (!isTokenPage()) state.copyPromptTrigger = null;
+        return;
+      }
+      state.copyPromptOpen = true;
+      renderAll();
+    }, 150);
+  }
+
+  function closeCopyPrompt(importNow = false) {
+    const trigger = state.copyPromptTrigger;
+    state.copyPromptOpen = false;
+    state.copyPromptTrigger = null;
+    renderAll();
+    if (importNow) {
+      openDialog();
+    } else if (trigger && trigger.isConnected) {
+      trigger.focus({ preventScroll: true });
+    }
   }
 
   function findCreateButton() {
@@ -1556,6 +1638,81 @@
     if (state.dialogOpen) state.shadow.append(renderDialog());
     if (state.queue.length) state.shadow.append(renderQueue());
     if (state.batchOpen) state.shadow.append(renderBatch());
+    if (state.copyPromptOpen) {
+      const prompt = renderCopyPrompt();
+      state.shadow.append(prompt);
+      prompt.showModal();
+    }
+  }
+
+  function renderCopyPrompt() {
+    const overlay = h('dialog', {
+      class: 'ktm-overlay ktm-copy-prompt',
+      attrs: {
+        'aria-labelledby': 'ktm-copy-prompt-title',
+        'aria-describedby': 'ktm-copy-prompt-description',
+      },
+    });
+    overlay.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      closeCopyPrompt();
+    });
+    overlay.addEventListener('mousedown', (event) => {
+      if (event.target === overlay) closeCopyPrompt();
+    });
+
+    const card = h('div', { class: 'ktm-card ktm-copy-card' });
+    const header = h('div', { class: 'ktm-copy-header' });
+    const brand = h('div', { class: 'ktm-copy-brand' });
+    brand.append(makeMagpieIcon(24));
+    const eyebrow = h('span', { class: 'ktm-copy-eyebrow', text: 'KEY TO MAGPIE' });
+    const close = h('button', {
+      class: 'ktm-icon-btn ktm-copy-close',
+      type: 'button',
+      attrs: { 'aria-label': '关闭提示' },
+      text: '×',
+      onclick: () => closeCopyPrompt(),
+    });
+    header.append(brand, eyebrow, close);
+
+    const title = h('h2', {
+      class: 'ktm-copy-title',
+      attrs: { id: 'ktm-copy-prompt-title' },
+      text: '要把密钥导入 Magpie 吗？',
+    });
+    const description = h(
+      'p',
+      { class: 'ktm-copy-description', attrs: { id: 'ktm-copy-prompt-description' } },
+      '继续后会打开导入面板，让你选择要导入的密钥。'
+    );
+    const note = h('div', { class: 'ktm-copy-note' });
+    note.innerHTML =
+      '<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="10" cy="10" r="7.25" stroke="currentColor" stroke-width="1.5"/><path d="M10 9v4m0-6h.01" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+    note.append(h('span', { text: '不会自动导入；最终保存仍由你在 Magpie 中确认。' }));
+
+    const actions = h('div', { class: 'ktm-copy-actions' });
+    const cancel = h('button', {
+      class: 'ktm-btn ktm-copy-secondary',
+      type: 'button',
+      autofocus: true,
+      text: '暂不导入',
+      onclick: () => closeCopyPrompt(),
+    });
+    actions.append(
+      cancel,
+      h(
+        'button',
+        { class: 'ktm-btn primary ktm-copy-primary', type: 'button', onclick: () => closeCopyPrompt(true) },
+        makeMagpieIcon(17),
+        h('span', { text: '打开导入面板' })
+      )
+    );
+    card.append(header, title, description, note, actions);
+    overlay.append(card);
+    setTimeout(() => {
+      if (cancel.isConnected) cancel.focus();
+    }, 0);
+    return overlay;
   }
 
   function renderDialog() {
@@ -2183,6 +2340,11 @@
       color: var(--ktm-fg);
       animation: ktm-fade .16s ease-out;
     }
+    .ktm-copy-prompt {
+      width: 100vw; height: 100vh; max-width: none; max-height: none;
+      margin: 0; border: 0; overflow: auto;
+    }
+    .ktm-copy-prompt::backdrop { background: transparent; }
     .ktm-card {
       --ktm-bg: #fff;
       --ktm-fg: #17171c;
@@ -2387,6 +2549,34 @@
     .ktm-toast.ok { border-color: rgba(74,222,128,.35); }
     .ktm-toast.warn { border-color: rgba(251,191,36,.4); }
     .ktm-toast.error { border-color: rgba(248,113,113,.45); }
+    .ktm-copy-card {
+      width: min(432px, 100%); max-height: none; padding: 24px;
+      border: 1px solid color-mix(in srgb, var(--ktm-line), transparent 12%);
+      border-radius: 20px;
+      box-shadow: 0 28px 80px rgba(0,0,0,.24), 0 2px 8px rgba(0,0,0,.08);
+    }
+    .ktm-copy-header { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; }
+    .ktm-copy-brand {
+      display: grid; place-items: center; width: 44px; height: 44px; flex: none;
+      border-radius: 14px; background: linear-gradient(135deg, #7c3aed, #ec4899);
+      box-shadow: 0 8px 18px rgba(124,58,237,.22);
+    }
+    .ktm-copy-eyebrow { color: var(--ktm-muted); font-size: 10px; font-weight: 750; letter-spacing: .12em; }
+    .ktm-copy-close { margin-left: auto; }
+    .ktm-copy-close:focus-visible, .ktm-copy-actions .ktm-btn:focus-visible {
+      outline: 3px solid rgba(124,58,237,.42); outline-offset: 2px;
+    }
+    .ktm-copy-title { margin: 0; font-size: 20px; font-weight: 740; letter-spacing: -.025em; line-height: 1.35; }
+    .ktm-copy-description { margin: 9px 0 18px; color: var(--ktm-muted); font-size: 14px; line-height: 1.65; }
+    .ktm-copy-note {
+      display: flex; align-items: flex-start; gap: 9px; margin-bottom: 22px; padding: 11px 12px;
+      border: 1px solid var(--ktm-line); border-radius: 12px; background: var(--ktm-soft);
+      color: var(--ktm-muted); font-size: 12px; line-height: 1.55;
+    }
+    .ktm-copy-note svg { width: 17px; height: 17px; flex: none; margin-top: 1px; color: var(--ktm-brand); }
+    .ktm-copy-actions { display: flex; justify-content: flex-end; gap: 9px; }
+    .ktm-copy-actions .ktm-btn { min-height: 42px; padding: 0 14px; border-radius: 11px; font-size: 13px; }
+    .ktm-copy-primary { display: inline-flex; gap: 8px; }
     @keyframes ktm-spin { to { transform: rotate(360deg); } }
     @keyframes ktm-fade { from { opacity: 0; } }
     @keyframes ktm-pop { from { opacity: 0; transform: translateY(8px) scale(.98); } }
@@ -2401,6 +2591,9 @@
       .ktm-grid { grid-template-columns: 1fr; }
       .ktm-overlay { padding: 10px; }
       .ktm-card { max-height: 92vh; border-radius: 14px; }
+      .ktm-copy-card { padding: 20px; border-radius: 18px; }
+      .ktm-copy-actions { flex-direction: column-reverse; }
+      .ktm-copy-actions .ktm-btn { width: 100%; }
       .ktm-queue { right: 10px; bottom: 10px; }
     }
   `;
@@ -2453,6 +2646,16 @@
       true
     );
 
+    document.addEventListener(
+      'click',
+      (event) => {
+        if (!event.isTrusted || !isTokenPage()) return;
+        const button = findKeyCopyButton(event.target);
+        if (button) requestMagpieImportAfterCopy(button);
+      },
+      true
+    );
+
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message && message.type === 'KTM_OPEN_PANEL') {
         openDialog();
@@ -2483,7 +2686,11 @@
   setInterval(() => {
     if (location.href === lastHref) return;
     lastHref = location.href;
+    const copyPromptWasOpen = state.copyPromptOpen;
+    state.copyPromptOpen = false;
+    state.copyPromptTrigger = null;
     if (state.dialogOpen) closeDialog();
+    else if (copyPromptWasOpen) renderAll();
     if (isTokenPage()) startOnTokenPage();
     if (started) scheduleInject();
   }, 1200);
