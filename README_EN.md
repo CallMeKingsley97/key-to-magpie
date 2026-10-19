@@ -23,7 +23,7 @@ A Chrome and Microsoft Edge (Chromium 111+) extension that adds an "Import to ma
    - Multiple keys: enters queue mode, invoking magpie one by one — confirm with **Add** in each magpie window
 5. Go back to the Providers page in magpie to confirm the new providers appear
 
-You can also click a token row's "Copy Key" button on new-api / sub2api. The extension asks whether to open the Magpie import panel; choose "Continue import" to select a token, or "Not now" to dismiss the prompt without affecting the site's copy action.
+On a new-api / sub2api token page, after content containing an `sk-` key is actually copied (for example, a key or connection info that includes the key), the extension asks whether to open the Magpie import panel. Choose "Open import panel" to select tokens, or "Not now" to dismiss the prompt without affecting the site's copy action. Merely opening a copy menu or copying content without a key does not trigger the prompt.
 
 ## Import Mapping
 

@@ -37,11 +37,6 @@
 
   const CREATE_BUTTON_RE =
     /(添加令牌|新增令牌|创建令牌|新建令牌|添加\s*API\s*密钥|新增\s*API\s*密钥|创建\s*API\s*密钥|新建\s*API\s*密钥|添加密钥|新增密钥|创建密钥|新建密钥|Create\s+API\s+Key|Add\s+API\s+Key|New\s+API\s+Key|Create\s+Token|Add\s+Token|New\s+Token|Create\s+Key|Add\s+Key)/i;
-  const COPY_KEY_RE =
-    /(?:copy|复制|複製).{0,16}(?:api\s*)?(?:key|token|secret|密钥|密鑰|令牌)|(?:api\s*)?(?:key|token|secret|密钥|密鑰|令牌)\s*(?:copy|复制|複製)/i;
-  const GENERIC_COPY_RE = /^(?:copy(?:\s+to clipboard)?|复制(?:到剪贴板)?|複製(?:到剪貼簿)?)$/i;
-  const KEY_COLUMN_RE = /(?:api\s*)?(?:key|token|secret)|密钥|密鑰|令牌/i;
-
   // ---------------------------------------------------------------------------
   // 状态
   // ---------------------------------------------------------------------------
@@ -287,60 +282,10 @@
     );
   }
 
-  function findKeyCopyButton(target) {
-    if (!(target instanceof Element)) return null;
-    const button = target.closest('button, [role="button"], a[role="button"]');
-    if (!button || button.closest('#' + ROOT_ID)) return null;
-
-    const labels = [
-      button.getAttribute('aria-label'),
-      button.getAttribute('title'),
-      button.getAttribute('data-tooltip'),
-      button.getAttribute('data-tooltip-content'),
-      button.getAttribute('data-original-title'),
-      button.getAttribute('data-title'),
-      button.textContent,
-    ]
-      .filter(Boolean)
-      .map((label) => label.trim())
-      .filter(Boolean);
-    if (labels.some((label) => COPY_KEY_RE.test(label))) return button;
-
-    const isGenericCopy = labels.some((label) => GENERIC_COPY_RE.test(label));
-    const row = button.closest('tr, [role="row"]');
-    if (isGenericCopy && row) return button;
-    if (!row) return null;
-
-    const cell = button.closest('td, [role="cell"], [role="gridcell"]');
-    if (!cell) return null;
-
-    const isIconOnly =
-      !button.textContent.trim() &&
-      !button.getAttribute('aria-label') &&
-      !button.getAttribute('title') &&
-      Boolean(button.querySelector('svg, img, [class*="icon"], [data-icon]'));
-    if (!isIconOnly) return null;
-
-    const table = row.closest('table, [role="table"], [role="grid"]');
-    if (table) {
-      const rowCells = Array.from(row.children).filter((child) =>
-        child.matches('td, [role="cell"], [role="gridcell"]')
-      );
-      const cellIndex = rowCells.indexOf(cell);
-      const headers = Array.from(
-        table.querySelectorAll('thead th, thead [role="columnheader"], [role="columnheader"]')
-      );
-      if (cellIndex >= 0 && headers[cellIndex] && KEY_COLUMN_RE.test(headers[cellIndex].textContent)) {
-        return button;
-      }
-    }
-
-    return null;
-  }
-
-  function requestMagpieImportAfterCopy(button) {
+  function requestMagpieImportAfterCopy() {
     if (state.copyPromptOpen) return;
-    state.copyPromptTrigger = button;
+    state.copyPromptTrigger =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setTimeout(() => {
       if (!isTokenPage() || state.copyPromptOpen) {
         if (!isTokenPage()) state.copyPromptTrigger = null;
@@ -2646,15 +2591,18 @@
       true
     );
 
-    document.addEventListener(
-      'click',
-      (event) => {
-        if (!event.isTrusted || !isTokenPage()) return;
-        const button = findKeyCopyButton(event.target);
-        if (button) requestMagpieImportAfterCopy(button);
-      },
-      true
-    );
+    window.addEventListener('message', (event) => {
+      const message = event.data;
+      if (
+        event.source !== window ||
+        event.origin !== location.origin ||
+        !message ||
+        message.source !== 'KTM_PAGE_AUTH' ||
+        message.type !== 'API_KEY_COPIED' ||
+        !isTokenPage()
+      ) return;
+      requestMagpieImportAfterCopy();
+    });
 
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message && message.type === 'KTM_OPEN_PANEL') {

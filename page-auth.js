@@ -3,11 +3,80 @@
 (() => {
   let newApiAccessToken = '';
   let newApiUserId = '';
+  let hasApiStationRequest = false;
+
+  const API_KEY_RE = /(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{4,}(?![A-Za-z0-9_-])/;
 
   const isTokenPage = () =>
     !/^\/(oauth|login|sign-?in|callback|auth)/i.test(location.pathname) &&
     (/(^|\/)(keys?|tokens?|api-keys)(\/|$)/i.test(location.pathname) ||
       /\/console\/(token|keys)(\/|$)/i.test(location.pathname));
+
+  const isApiStationPage = () => {
+    if (!isTokenPage()) return false;
+    if (hasApiStationRequest) return true;
+    try {
+      return Boolean(localStorage.getItem('auth_token') || window.__APP_CONFIG__?.site_name);
+    } catch {
+      return false;
+    }
+  };
+
+  const isApiStationManagementRequest = (requestUrl) => {
+    try {
+      const url = new URL(requestUrl, location.href);
+      return (
+        url.origin === location.origin &&
+        /(?:^|\/)api\/(?:user|token|v1\/(?:keys|settings\/public))(?:\/|$)/i.test(url.pathname)
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const announceCopiedApiKey = () => {
+    window.postMessage({ source: 'KTM_PAGE_AUTH', type: 'API_KEY_COPIED' }, location.origin);
+  };
+
+  try {
+    const clipboard = navigator.clipboard;
+    const originalClipboardWriteText = clipboard && clipboard.writeText;
+    if (typeof originalClipboardWriteText === 'function') {
+      clipboard.writeText = function (text) {
+        const containsApiKey = isApiStationPage() && typeof text === 'string' && API_KEY_RE.test(text);
+        const result = originalClipboardWriteText.apply(this, arguments);
+        if (!containsApiKey) return result;
+        return Promise.resolve(result).then((value) => {
+          announceCopiedApiKey();
+          return value;
+        });
+      };
+    }
+  } catch {}
+
+  window.addEventListener('copy', (event) => {
+    if (!isApiStationPage() || !event.clipboardData) return;
+    let text = '';
+    try {
+      text = event.clipboardData.getData('text/plain') || event.clipboardData.getData('text');
+    } catch {}
+    if (!text) {
+      const activeElement = document.activeElement;
+      if (
+        activeElement instanceof HTMLInputElement ||
+        activeElement instanceof HTMLTextAreaElement
+      ) {
+        const selectionStart = activeElement.selectionStart;
+        const selectionEnd = activeElement.selectionEnd;
+        if (selectionStart != null && selectionEnd != null && selectionEnd > selectionStart) {
+          text = activeElement.value.slice(selectionStart, selectionEnd);
+        }
+      } else {
+        text = window.getSelection()?.toString() || '';
+      }
+    }
+    if (typeof text === 'string' && API_KEY_RE.test(text)) announceCopiedApiKey();
+  });
 
   const isNewApiManagementRequest = (requestUrl) => {
     try {
@@ -29,6 +98,7 @@
 
   const originalXhrOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, requestUrl) {
+    if (isTokenPage() && isApiStationManagementRequest(requestUrl)) hasApiStationRequest = true;
     this.__ktmCaptureNewApiAuth = isTokenPage() && isNewApiManagementRequest(requestUrl);
     return originalXhrOpen.apply(this, arguments);
   };
@@ -50,6 +120,7 @@
   const originalFetch = window.fetch;
   window.fetch = function (input, init) {
     const requestUrl = typeof input === 'string' ? input : input && input.url ? input.url : String(input);
+    if (isTokenPage() && isApiStationManagementRequest(requestUrl)) hasApiStationRequest = true;
     if (isTokenPage() && isNewApiManagementRequest(requestUrl)) {
       try {
         const headers = new Headers((init && init.headers) || (input && input.headers) || {});
