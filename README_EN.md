@@ -71,11 +71,25 @@ where there is no command to run.
 
 Different relay stations support different API endpoints (e.g. some only expose
 `/v1/chat/completions` without Anthropic's `/v1/messages`). When the import panel
-opens, a minimal request is sent to each of the four endpoints for probing:
+opens, the extension uses one enabled token's API key to request `/v1/models` once,
+then probes Chat, Responses, and Anthropic with the returned model ID. Each request
+has a non-empty message and a one-token output limit, so successful probes may incur
+a small usage charge. Gemini requires a separate model list, so it is not probed
+automatically to avoid repeating model-list requests:
 
-- `404 / 405` → the station doesn't support this endpoint; it gets unchecked automatically and marked "not detected" in advanced settings
-- `401 / 400 / 200`, etc. → the endpoint exists, stays checked
-- Probe failed (network error, etc.) → marked "not probed", stays checked by default
+- `404 / 405 / 501` → the station doesn't support this endpoint; it is unchecked by default and marked "not detected"; saved preferences are preserved
+- `2xx` → the endpoint responded successfully and is marked "detected"
+- Other `4xx` responses (except `401 / 403`) → the request was rejected and support is "unknown"; an error response is not treated as usable
+- `401` → API key authentication failed and is not counted as success
+- `403` → the key or its group lacks access; the endpoint is unchecked by default, while saved preferences are preserved
+- `429 / 5xx` or network errors → marked "could not confirm" and stays checked by default
+- Failed responses show the HTTP status and a short error summary for diagnosis
+
+OpenAI-compatible endpoints use `Authorization: Bearer`; Anthropic uses `x-api-key`.
+If no enabled token exists or its plaintext key cannot be read, probing is skipped
+rather than sending unauthenticated requests. Failure to probe `/v1/models` does not
+block import; sub2api still fetches the model catalog with the selected key during
+import, leaving `models` empty if that request fails.
 
 Probing only affects default checkboxes and hints. You can always toggle endpoints
 manually under "Advanced settings → Imported API endpoints"; once you've changed

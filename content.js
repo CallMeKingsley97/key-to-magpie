@@ -62,8 +62,10 @@
     balance: true,
     /** @type {Record<'chat'|'responses'|'anthropic'|'gemini', string>} 各端点完整 URL（探测用） */
     endpointUrls: { chat: '', responses: '', anthropic: '', gemini: '' },
-    /** @type {Record<string, 'ok'|'missing'|'unknown'>} 端点探测结果 */
+    /** @type {Record<string, 'ok'|'auth'|'forbidden'|'missing'|'unknown'|'skipped'>} 端点探测结果 */
     probe: {},
+    probeDetails: {},
+    probeMessage: '',
     probing: false,
     /** @type {{name:string,id:string,link:string,token:Token}[]} */
     queue: [],
@@ -560,15 +562,83 @@
    *
    * 不同中转站适配的端点不一样（见 magpie 的「API 端点」面板：anthropic
    * /v1/messages、openai /v1/chat/completions 等）。不存在的端点导入后
-   * magpie 里对话会 404，所以这里逐个发一个最小请求：
-   *   - 404 / 405 → 端点不存在，标记 missing（默认取消勾选）
-   *   - 401 / 400 / 200 → 端点存在（只是没带 key 或参数），标记 ok
+   * magpie 里对话会 404，所以这里按 New API 文档发最小有效请求：
+   * 使用一个已启用令牌的 API Key；不同协议使用各自要求的认证头。
+   *   - 404 / 405 / 501 → 端点不存在，标记 missing（默认取消勾选）
+   *   - 401 / 403 → Key 认证失败或无权限，不视为端点已确认
+   *   - 2xx → 端点响应成功，标记 ok
+   *   - 其他 4xx（除 401 / 403）→ 请求被拒绝，无法确认端点可用
+   *   - 其他状态或网络错误 → 无法确认，保留默认勾选
    *
    * 探测结果只影响默认勾选与 UI 提示，用户仍可在高级设置里手动开关。
    */
+  function classifyProbeStatus(status) {
+    if (status === 404 || status === 405 || status === 501) return 'missing';
+    if (status === 401) return 'auth';
+    if (status === 403) return 'forbidden';
+    if (status >= 200 && status < 300) return 'ok';
+    return 'unknown';
+  }
+
   async function probeEndpoints(ctx) {
-    const result = { chat: 'unknown', responses: 'unknown', anthropic: 'unknown', gemini: 'unknown' };
+    const result = {};
+    const details = {};
     const urls = ctx.endpointUrls;
+    const token = state.tokens.find((item) => item.enabled);
+    if (!token) {
+      return { statuses: result, details, message: '没有启用的 API Key，未执行端点探测。' };
+    }
+
+    let apiKey = '';
+    try {
+      const resolved = await resolveKeys([token], false);
+      apiKey = resolved.map.get(token.id) || '';
+    } catch {
+      /* 未能读取 Key 时跳过探测，避免发送无认证请求 */
+    }
+    if (!apiKey) {
+      return { statuses: result, details, message: '未能读取已启用令牌的 API Key，未执行端点探测。' };
+    }
+
+    const bearer = { Authorization: `Bearer ${apiKey}` };
+    const contentType = { 'Content-Type': 'application/json' };
+    const modelResult = { model: '', status: 'unknown' };
+    try {
+      const res = await fetchWithTimeout(
+        ctx.openaiBase + '/models',
+        { headers: bearer },
+        8000
+      );
+      modelResult.status = classifyProbeStatus(res.status);
+      if (res.ok) {
+        const json = await safeJson(res);
+        const rows = json && Array.isArray(json.data) ? json.data : [];
+        const firstModel = rows.find((row) => row && typeof row.id === 'string' && row.id.trim());
+        if (firstModel) modelResult.model = firstModel.id.trim();
+      } else {
+        details.models = await describeProbeFailure(res, apiKey);
+      }
+    } catch {
+      modelResult.status = 'unknown';
+      details.models = '网络错误或请求超时';
+    }
+    result.models = modelResult.status;
+
+    const model =
+      modelResult.model ||
+      (Array.isArray(token.models) ? token.models.find((item) => typeof item === 'string' && item.trim()) : '') ||
+      '';
+    if (!model) {
+      result.chat = 'unknown';
+      result.responses = 'unknown';
+      result.anthropic = 'unknown';
+      result.gemini = 'skipped';
+      return {
+        statuses: result,
+        details,
+        message: '未能从 /v1/models 或令牌限制中取得可用模型，未发送模型探测请求。',
+      };
+    }
 
     const checks = [
       {
@@ -576,8 +646,12 @@
         run: () =>
           fetchWithTimeout(urls.chat, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: 'probe', messages: [] }),
+            headers: { ...contentType, ...bearer },
+            body: JSON.stringify({
+              model,
+              messages: [{ role: 'user', content: 'Reply with 1.' }],
+              max_tokens: 1,
+            }),
           }),
       },
       {
@@ -585,8 +659,8 @@
         run: () =>
           fetchWithTimeout(urls.responses, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: 'probe', input: '' }),
+            headers: { ...contentType, ...bearer },
+            body: JSON.stringify({ model, input: 'Reply with 1.', max_output_tokens: 1, store: false }),
           }),
       },
       {
@@ -594,13 +668,17 @@
         run: () =>
           fetchWithTimeout(urls.anthropic, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'anthropic-version': '2023-06-01' },
-            body: JSON.stringify({ model: 'probe', max_tokens: 1, messages: [] }),
+            headers: {
+              ...contentType,
+              'x-api-key': apiKey,
+              'anthropic-version': '2023-06-01',
+            },
+            body: JSON.stringify({
+              model,
+              max_tokens: 1,
+              messages: [{ role: 'user', content: 'Reply with 1.' }],
+            }),
           }),
-      },
-      {
-        key: 'gemini',
-        run: () => fetchWithTimeout(urls.gemini, { method: 'GET' }),
       },
     ];
 
@@ -608,20 +686,33 @@
       checks.map(async ({ key, run }) => {
         try {
           const res = await run();
-          if (res.status === 404 || res.status === 405 || res.status === 501) {
-            result[key] = 'missing';
-          } else {
-            // 200/400/401/403/429/5xx 都说明路由存在
-            result[key] = 'ok';
-          }
+          result[key] = classifyProbeStatus(res.status);
+          if (!res.ok) details[key] = await describeProbeFailure(res, apiKey);
         } catch {
           // 探测失败不影响使用，只是无法给出提示
           result[key] = 'unknown';
+          details[key] = '网络错误或请求超时';
         }
       })
     );
 
-    return result;
+    result.gemini = 'skipped';
+    return {
+      statuses: result,
+      details,
+      message: '为避免重复请求模型列表，本次未单独探测 Gemini；可在高级设置中手动启用或关闭。',
+    };
+  }
+
+  async function describeProbeFailure(response, apiKey) {
+    const body = await safeJson(response.clone());
+    const error = body && body.error;
+    const message =
+      (error && typeof error.message === 'string' && error.message) ||
+      (typeof body?.message === 'string' && body.message) ||
+      '';
+    const safeMessage = message.replaceAll(apiKey, '[已隐藏]').replace(/\s+/g, ' ').slice(0, 180);
+    return `HTTP ${response.status}${safeMessage ? `：${safeMessage}` : ''}`;
   }
 
   async function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT) {
@@ -1135,7 +1226,7 @@
     await Promise.all(Array.from({ length: Math.min(CONCURRENCY, targets.length) }, worker));
   }
 
-  async function resolveKeys(tokens) {
+  async function resolveKeys(tokens, fetchModels = true) {
     const map = new Map();
     const failures = [];
 
@@ -1150,7 +1241,7 @@
       // sub2api 的模型限制挂在分组上，列表接口不返回，所以这里用明文 key
       // 调一次 /v1/models：该接口按 key 所属分组的 allowlist 过滤，结果就是
       // 这个 key 实际能用的模型。失败不影响导入，留空让 magpie 自己获取。
-      await fillSub2ApiModels(tokens, map);
+      if (fetchModels) await fillSub2ApiModels(tokens, map);
       return { map, failures };
     }
 
@@ -1365,19 +1456,25 @@
     state.endpoints = { ...DEFAULT_ENDPOINTS, ...(prefs.endpoints || {}) };
     state.balance = typeof prefs.balance === 'boolean' ? prefs.balance : true;
     state.probe = {};
+    state.probeDetails = {};
+    state.probeMessage = '';
 
     // 探测站点支持的端点：missing 的端点默认不勾选。
     // 用户手动改过端点偏好（prefs.endpoints 存在）时尊重用户选择。
     const userConfigured = Boolean(prefs.endpoints);
     state.probing = true;
     probeEndpoints(ctx)
-      .then((probe) => {
+      .then(({ statuses, details, message }) => {
         // 面板可能已被关闭或切换了站点
         if (state.ctx !== ctx) return;
-        state.probe = probe;
+        state.probe = statuses;
+        state.probeDetails = details;
+        state.probeMessage = message;
         if (!userConfigured) {
           for (const key of Object.keys(DEFAULT_ENDPOINTS)) {
-            if (probe[key] === 'missing') state.endpoints[key] = false;
+            if (statuses[key] === 'missing' || statuses[key] === 'forbidden') {
+              state.endpoints[key] = false;
+            }
           }
         }
         if (state.dialogOpen) {
@@ -1426,6 +1523,8 @@
     state.newApiToken = '';
     state.authError = '';
     state.probe = {};
+    state.probeDetails = {};
+    state.probeMessage = '';
     state.probing = false;
     ensureHost();
     renderAll();
@@ -1433,12 +1532,12 @@
     try {
       const ctx = await detectContext();
       state.ctx = ctx;
-      await loadPrefs(ctx);
       const tokens = await loadTokens(ctx);
       state.tokens = tokens.sort((a, b) => {
         if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
         return a.name.localeCompare(b.name, 'zh-Hans-CN');
       });
+      await loadPrefs(ctx);
     } catch (error) {
       const message = error && error.message ? error.message : String(error);
       state.error = /abort|timeout|failed to fetch|network/i.test(message)
@@ -1824,7 +1923,14 @@
         anthropic: 'Anthropic',
         gemini: 'Gemini',
       };
-      const probeLabels = { ok: '已检测到', missing: '未检测到', unknown: '未探测' };
+      const probeLabels = {
+        ok: '已检测到',
+        auth: '认证失败',
+        forbidden: '无访问权限',
+        missing: '未检测到',
+        unknown: '无法确认',
+        skipped: '暂未探测',
+      };
       for (const key of Object.keys(endpointLabels)) {
         const checkbox = h('input', {
           type: 'checkbox',
@@ -1837,14 +1943,13 @@
           updateFooter();
         });
         const probe = state.probe[key];
-        const badge =
-          probe && probe !== 'unknown'
-            ? h('span', { class: `ktm-probe ${probe}` }, probeLabels[probe])
-            : null;
+        const badge = probe
+          ? h('span', { class: `ktm-probe ${probe}` }, probeLabels[probe])
+          : null;
         endpoints.append(
           h(
             'label',
-            { class: 'ktm-toggle' },
+            { class: 'ktm-toggle', title: state.probeDetails[key] || '' },
             checkbox,
             h('span', {}, endpointLabels[key]),
             badge
@@ -1925,16 +2030,66 @@
     if (!state.endpointSummaryEl || !state.ctx) return;
     const values = endpointValues();
     const rows = Object.entries(values).map(([key, value]) => `${key}: ${value}`);
-    const missing = Object.keys(state.probe).filter((key) => state.probe[key] === 'missing');
-    const hint = missing.length
-      ? `站点未适配：${missing.join(' / ')}（已自动取消勾选，可手动开启）`
-      : state.probing
-        ? '正在探测站点支持的端点…'
-        : '';
+    const probeNames = {
+      chat: 'OpenAI Chat',
+      responses: 'OpenAI Responses',
+      anthropic: 'Anthropic',
+      gemini: 'Gemini',
+      models: '/v1/models',
+    };
+    const probeLabels = {
+      ok: '已检测到',
+      auth: '认证失败',
+      forbidden: '无访问权限',
+      missing: '未检测到',
+      unknown: '无法确认',
+      skipped: '暂未探测',
+    };
+    const missing = Object.keys(DEFAULT_ENDPOINTS).filter((key) => state.probe[key] === 'missing');
+    const authFailed = Object.keys(state.probe).filter((key) => state.probe[key] === 'auth');
+    const forbidden = Object.keys(state.probe).filter((key) => state.probe[key] === 'forbidden');
+    const unknown = Object.keys(state.probe).filter((key) => state.probe[key] === 'unknown');
+    const hints = [];
+    if (missing.length) {
+      hints.push({
+        text: `站点未适配：${missing.map((key) => probeNames[key]).join(' / ')}（默认取消勾选，保留已保存偏好）`,
+        kind: 'error',
+      });
+    }
+    if (authFailed.length) {
+      hints.push({
+        text: `API Key 认证失败：${authFailed.map((key) => probeNames[key]).join(' / ')}（不作为已检测成功）`,
+        kind: 'note',
+      });
+    }
+    if (forbidden.length) {
+      hints.push({
+        text: `API Key 或所属分组无权访问：${forbidden.map((key) => probeNames[key]).join(' / ')}（默认取消勾选，保留已保存偏好）`,
+        kind: 'note',
+      });
+    }
+    if (state.probe.models) {
+      hints.push({
+        text: `/v1/models：${probeLabels[state.probe.models]}${state.probe.models === 'unknown' ? '（接口请求未成功）' : ''}`,
+        kind: state.probe.models === 'ok' ? 'success' : 'note',
+      });
+    }
+    if (unknown.length) {
+      hints.push({
+        text: `无法确认：${unknown.map((key) => probeNames[key]).join(' / ')}（探测失败，保留默认勾选）`,
+        kind: 'note',
+      });
+    }
+    const failures = Object.entries(state.probeDetails).map(([key, detail]) => `${probeNames[key]}：${detail}`);
+    if (failures.length) hints.push({ text: failures.join('；'), kind: 'note' });
+    if (state.probeMessage) hints.push({ text: state.probeMessage, kind: 'note' });
+    if (state.probing) hints.push({ text: '正在探测站点支持的端点…', kind: 'note' });
     state.endpointSummaryEl.replaceChildren(
       h('div', { class: 'ktm-preview-title' }, '将写入 magpie 的端点'),
       ...rows.map((row) => h('code', { class: 'ktm-preview-row' }, row)),
-      hint ? h('div', { class: 'ktm-preview-hint' }, hint) : null
+      ...hints.map(({ text, kind }) =>
+        h('div', { class: `ktm-preview-hint${kind === 'note' ? ' neutral' : ''}` }, text)
+      )
     );
   }
 
@@ -2411,6 +2566,7 @@
     }
     .ktm-probe.ok { color: var(--ktm-ok); background: color-mix(in srgb, var(--ktm-ok) 10%, transparent); }
     .ktm-probe.missing { color: var(--ktm-bad); background: color-mix(in srgb, var(--ktm-bad) 10%, transparent); }
+    .ktm-probe.auth, .ktm-probe.forbidden, .ktm-probe.unknown { color: var(--ktm-muted); background: var(--ktm-soft); }
     .ktm-hint {
       font-size: 11px; font-weight: 400; color: var(--ktm-muted);
       max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -2420,6 +2576,8 @@
     .ktm-preview-title { font-weight: 650; margin-bottom: 2px; }
     .ktm-preview-row { background: none !important; border: 0 !important; padding: 0 !important; color: var(--ktm-muted) !important; }
     .ktm-preview-hint { color: var(--ktm-bad); font-size: 11px; }
+    .ktm-preview-hint.neutral { color: var(--ktm-muted); }
+    .ktm-preview-hint.success { color: var(--ktm-ok); }
     .ktm-btn:focus-visible, .ktm-icon-btn:focus-visible, .ktm-check:focus-visible, .ktm-toggle input:focus-visible {
       outline: 2px solid var(--ktm-brand); outline-offset: 2px;
     }
