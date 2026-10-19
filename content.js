@@ -25,7 +25,7 @@
   const PAGE_SIZE = 100;
   const MAX_TOKENS = 1000;
   const FETCH_TIMEOUT = 15000;
-  const PROBE_TIMEOUT = 1000;
+  const PROBE_TIMEOUT = 3000;
   const MAX_NAME_BYTES = 80;
   const MAX_MODELS = 200;
 
@@ -659,15 +659,15 @@
     if (signal.aborted && !modelRequest.timedOut) return { cancelled: true };
     if (modelRequest.error || modelRequest.timedOut) {
       modelResult.status = 'unknown';
-      details.models = modelRequest.timedOut ? '超过 1 秒未响应，已停止后续探测' : '网络错误';
+      details.models = modelRequest.timedOut ? '超过 3 秒未响应，已停止后续探测' : '网络错误';
     }
     result.models = modelResult.status;
 
     if (modelRequest.timedOut) {
       return {
         statuses: {},
-        details: { models: '超过 1 秒未响应，已停止后续探测' },
-        message: '单个请求超过 1 秒，已停止后续探测；不影响导入。',
+        details: { models: '超过 3 秒未响应，已停止后续探测' },
+        message: '单个请求超过 3 秒，已停止后续探测；不影响导入。',
         complete: false,
       };
     }
@@ -743,7 +743,7 @@
       if (signal.aborted && !request.timedOut) return { cancelled: true };
       if (request.error || request.timedOut) {
         result[key] = 'unknown';
-        details[key] = request.timedOut ? '超过 1 秒未响应，已停止后续探测' : '网络错误';
+        details[key] = request.timedOut ? '超过 3 秒未响应，已停止后续探测' : '网络错误';
       } else {
         result[key] = classifyProbeStatus(request.value.status);
         if (!request.value.ok) details[key] = `HTTP ${request.value.status}`;
@@ -751,8 +751,8 @@
       if (request.timedOut) {
         return {
           statuses: {},
-          details: { [key]: '超过 1 秒未响应，已停止后续探测' },
-          message: '单个请求超过 1 秒，已停止后续探测；不影响导入。',
+          details: { [key]: '超过 3 秒未响应，已停止后续探测' },
+          message: '单个请求超过 3 秒，已停止后续探测；不影响导入。',
           complete: false,
         };
       }
@@ -2170,7 +2170,7 @@
     const failures = Object.entries(state.probeDetails).map(([key, detail]) => `${probeNames[key]}：${detail}`);
     if (failures.length) hints.push({ text: failures.join('；'), kind: 'note' });
     if (state.probeMessage) hints.push({ text: state.probeMessage, kind: 'note' });
-    if (state.probing) hints.push({ text: '正在依次探测（单请求最多 1 秒，可直接导入）…', kind: 'note' });
+    if (state.probing) hints.push({ text: '正在依次探测（单请求最多 3 秒，可直接导入）…', kind: 'note' });
     state.endpointSummaryEl.replaceChildren(
       h('div', { class: 'ktm-preview-title' }, '将写入 magpie 的端点'),
       ...rows.map((row) => h('code', { class: 'ktm-preview-row' }, row)),
