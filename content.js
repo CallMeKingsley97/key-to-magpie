@@ -45,6 +45,7 @@
 
   const state = {
     enabled: true,
+    contextInvalidated: false,
     featureController: new AbortController(),
     /** @type {null | ReturnType<typeof makeContext>} */
     ctx: null,
@@ -105,6 +106,40 @@
   // ---------------------------------------------------------------------------
   // 基础工具
   // ---------------------------------------------------------------------------
+
+  function extensionContextAvailable() {
+    try {
+      return typeof chrome !== 'undefined' && Boolean(chrome.runtime && chrome.runtime.id);
+    } catch {
+      return false;
+    }
+  }
+
+  function invalidateExtensionContext() {
+    if (state.contextInvalidated) return;
+    state.contextInvalidated = true;
+    state.enabled = false;
+    state.featureController.abort();
+    cancelEndpointProbe();
+    setPageAuthEnabled(false);
+    stopOnTokenPage();
+    state.host?.remove();
+    state.host = null;
+    state.shadow = null;
+    state.dialogOpen = false;
+    state.copyPromptOpen = false;
+    state.queue = [];
+    state.tokens = [];
+    state.selected.clear();
+    state.keyCache.clear();
+  }
+
+  function extensionContextIsUsable() {
+    if (state.contextInvalidated) return false;
+    if (extensionContextAvailable()) return true;
+    invalidateExtensionContext();
+    return false;
+  }
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -260,7 +295,7 @@
   }
 
   function toast(text, kind = 'info') {
-    if (!state.enabled) return;
+    if (!state.enabled || !extensionContextIsUsable()) return;
     ensureHost();
     state.shadow.querySelectorAll('.ktm-toast').forEach((el) => el.remove());
     const el = h('div', {
@@ -277,7 +312,12 @@
 
   function makeMagpieIcon(size) {
     const icon = document.createElement('img');
-    icon.src = chrome.runtime.getURL('icons/magpie.svg');
+    try {
+      icon.src = chrome.runtime.getURL('icons/magpie.svg');
+    } catch {
+      invalidateExtensionContext();
+      return icon;
+    }
     icon.width = size;
     icon.height = size;
     icon.alt = '';
@@ -427,8 +467,13 @@
   }
 
   function ensureFloatingButton() {
-    if (document.querySelector('[data-ktm="floating"]')) return;
-    document.documentElement.append(makeFloatingButton());
+    if (
+      !state.enabled ||
+      state.contextInvalidated ||
+      document.querySelector('[data-ktm="floating"]')
+    ) return;
+    const button = makeFloatingButton();
+    if (state.enabled && !state.contextInvalidated) document.documentElement.append(button);
   }
 
   function removeFloatingButton() {
@@ -436,6 +481,8 @@
   }
 
   function injectUi() {
+    if (state.contextInvalidated) return;
+    if (!extensionContextIsUsable()) return;
     if (!state.enabled) {
       document.querySelectorAll('[data-ktm="toolbar"], [data-ktm="floating"]').forEach((el) => el.remove());
       return;
@@ -452,9 +499,12 @@
       removeFloatingButton();
       if (!existing) {
         try {
-          target.insertAdjacentElement('afterend', makeToolbarButton());
+          const button = makeToolbarButton();
+          if (state.enabled && !state.contextInvalidated) {
+            target.insertAdjacentElement('afterend', button);
+          }
         } catch {
-          ensureFloatingButton();
+          if (state.enabled && !state.contextInvalidated) ensureFloatingButton();
         }
       }
       return;
@@ -1491,14 +1541,44 @@
   function sendMessage(message) {
     return new Promise((resolve) => {
       try {
+        if (!extensionContextIsUsable()) {
+          resolve({ ok: false, error: '扩展上下文已失效。' });
+          return;
+        }
         chrome.runtime.sendMessage(message, (response) => {
-          if (chrome.runtime.lastError) {
-            resolve({ ok: false, error: chrome.runtime.lastError.message });
-            return;
+          try {
+            if (!extensionContextIsUsable()) {
+              resolve({ ok: false, error: '扩展上下文已失效。' });
+              return;
+            }
+            const lastError = chrome.runtime.lastError;
+            if (lastError) {
+              if (/extension context invalidated/i.test(lastError.message || '')) {
+                invalidateExtensionContext();
+              }
+              resolve({ ok: false, error: lastError.message });
+              return;
+            }
+            resolve(response || { ok: false });
+          } catch (error) {
+            if (
+              /extension context invalidated/i.test(
+                error && error.message ? error.message : String(error)
+              )
+            ) {
+              invalidateExtensionContext();
+            }
+            resolve({ ok: false, error: String(error && error.message ? error.message : error) });
           }
-          resolve(response || { ok: false });
         });
       } catch (error) {
+        if (
+          /extension context invalidated/i.test(
+            error && error.message ? error.message : String(error)
+          )
+        ) {
+          invalidateExtensionContext();
+        }
         resolve({ ok: false, error: String(error && error.message ? error.message : error) });
       }
     });
@@ -1606,7 +1686,7 @@
   }, 400);
 
   async function openDialog() {
-    if (!state.enabled) return;
+    if (!state.enabled || !extensionContextIsUsable()) return;
     if (!isTokenPage()) {
       toast('请在令牌管理页使用这个功能。');
       return;
@@ -2871,6 +2951,7 @@
   }
 
   function setFeatureEnabled(enabled, force = false) {
+    if (!extensionContextIsUsable()) return;
     const nextEnabled = enabled !== false;
     const changed = state.enabled !== nextEnabled;
     state.enabled = nextEnabled;
@@ -2907,7 +2988,7 @@
   }
 
   function startOnTokenPage() {
-    if (!state.enabled || !isTokenPage()) return;
+    if (!state.enabled || state.contextInvalidated || !isTokenPage()) return;
     setPageAuthEnabled(true);
     if (!started) {
       started = true;
@@ -2981,6 +3062,7 @@
   }
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!extensionContextIsUsable()) return false;
     if (!message || sender.id !== chrome.runtime.id) return false;
     if (message.type === 'KTM_GET_STATUS') {
       sendResponse({ ok: true, enabled: state.enabled, supported: isTokenPage() });
@@ -3008,7 +3090,7 @@
   });
 
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== 'local' || !changes[siteEnabledKey()]) return;
+    if (!extensionContextIsUsable() || areaName !== 'local' || !changes[siteEnabledKey()]) return;
     enabledPreferenceChanged = true;
     setFeatureEnabled(changes[siteEnabledKey()].newValue !== false, true);
   });
