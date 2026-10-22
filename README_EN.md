@@ -23,6 +23,11 @@ A Chrome and Microsoft Edge (Chromium 111+) extension that adds an "Import to ma
    - Multiple keys: enters queue mode, invoking magpie one by one — confirm with **Add** in each magpie window
 5. Go back to the Providers page in magpie to confirm the new providers appear
 
+Open the browser toolbar popup to view and toggle the extension for the current site.
+The setting is saved per origin (scheme, hostname, and port). Turning it off immediately
+removes the page controls, closes extension panels, and stops extension requests; it stays
+off after reload. Use this if a site is incompatible or reacts badly to extension requests.
+
 On a new-api / sub2api token page, after content containing an `sk-` key is actually copied (for example, a key or connection info that includes the key), the extension asks whether to open the Magpie import panel. Choose "Open import panel" to select tokens, or "Not now" to dismiss the prompt without affecting the site's copy action. Merely opening a copy menu or copying content without a key does not trigger the prompt.
 
 ## Import Mapping
@@ -122,6 +127,8 @@ of the four endpoints; preferences are remembered per station.
 - [ ] (Optional) repeat the above on a sub2api station's `/keys` page
 - [ ] Disable an endpoint (e.g. gemini) in advanced settings → that endpoint is empty after import
 - [ ] Open a station that only supports some endpoints, confirm unsupported endpoints are unchecked automatically and marked "not detected"
+- [ ] Disable the current site from the extension popup; confirm page controls and panels disappear and remain disabled after reload
+- [ ] Re-enable the current site from the extension popup and confirm the token-page button returns
 - [ ] "Configure balance query" in advanced settings shows this station's balance endpoint (new-api: `/api/usage/token`, sub2api: `/v1/usage`)
 - [ ] After importing via "Batch command", the provider card in magpie shows a balance
 - [ ] After importing from a sub2api station, that provider's model list in magpie is not empty

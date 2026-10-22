@@ -4,6 +4,13 @@
   let newApiAccessToken = '';
   let newApiUserId = '';
   let hasApiStationRequest = false;
+  let enabled = false;
+  let hooksInstalled = false;
+  let originalClipboardWriteText = null;
+  let originalXhrOpen = null;
+  let originalSetRequestHeader = null;
+  let originalFetch = null;
+  const authRequests = new Map();
 
   const API_KEY_RE = /(?:^|[^A-Za-z0-9_-])sk-[A-Za-z0-9_-]{4,}(?![A-Za-z0-9_-])/;
 
@@ -13,7 +20,7 @@
       /\/console\/(token|keys)(\/|$)/i.test(location.pathname));
 
   const isApiStationPage = () => {
-    if (!isTokenPage()) return false;
+    if (!enabled || !isTokenPage()) return false;
     if (hasApiStationRequest) return true;
     try {
       return Boolean(localStorage.getItem('auth_token') || window.__APP_CONFIG__?.site_name);
@@ -34,27 +41,29 @@
     }
   };
 
+  const isNewApiManagementRequest = (requestUrl) => {
+    try {
+      const url = new URL(requestUrl, location.href);
+      return url.origin === location.origin && /^\/api\/(user|token)(\/|$)/i.test(url.pathname);
+    } catch {
+      return false;
+    }
+  };
+
   const announceCopiedApiKey = () => {
     window.postMessage({ source: 'KTM_PAGE_AUTH', type: 'API_KEY_COPIED' }, location.origin);
   };
 
-  try {
-    const clipboard = navigator.clipboard;
-    const originalClipboardWriteText = clipboard && clipboard.writeText;
-    if (typeof originalClipboardWriteText === 'function') {
-      clipboard.writeText = function (text) {
-        const containsApiKey = isApiStationPage() && typeof text === 'string' && API_KEY_RE.test(text);
-        const result = originalClipboardWriteText.apply(this, arguments);
-        if (!containsApiKey) return result;
-        return Promise.resolve(result).then((value) => {
-          announceCopiedApiKey();
-          return value;
-        });
-      };
-    }
-  } catch {}
+  const captureNewApiHeaders = (headers) => {
+    const authorization = headers.get('Authorization') || '';
+    const accessToken = authorization.match(/^Bearer\s+(.+)$/i);
+    if (accessToken) newApiAccessToken = accessToken[1].trim();
 
-  window.addEventListener('copy', (event) => {
+    const userId = headers.get('New-Api-User') || '';
+    if (/^[1-9]\d*$/.test(userId)) newApiUserId = userId;
+  };
+
+  function onCopy(event) {
     if (!isApiStationPage() || !event.clipboardData) return;
     let text = '';
     try {
@@ -76,36 +85,28 @@
       }
     }
     if (typeof text === 'string' && API_KEY_RE.test(text)) announceCopiedApiKey();
-  });
+  }
 
-  const isNewApiManagementRequest = (requestUrl) => {
-    try {
-      const url = new URL(requestUrl, location.href);
-      return url.origin === location.origin && /^\/api\/(user|token)(\/|$)/i.test(url.pathname);
-    } catch {
-      return false;
+  function patchedClipboardWriteText(text) {
+    const containsApiKey = isApiStationPage() && typeof text === 'string' && API_KEY_RE.test(text);
+    const result = originalClipboardWriteText.apply(this, arguments);
+    if (!containsApiKey) return result;
+    return Promise.resolve(result).then((value) => {
+      announceCopiedApiKey();
+      return value;
+    });
+  }
+
+  function patchedXhrOpen(method, requestUrl) {
+    if (enabled && isTokenPage() && isApiStationManagementRequest(requestUrl)) {
+      hasApiStationRequest = true;
     }
-  };
-
-  const captureNewApiHeaders = (headers) => {
-    const authorization = headers.get('Authorization') || '';
-    const accessToken = authorization.match(/^Bearer\s+(.+)$/i);
-    if (accessToken) newApiAccessToken = accessToken[1].trim();
-
-    const userId = headers.get('New-Api-User') || '';
-    if (/^[1-9]\d*$/.test(userId)) newApiUserId = userId;
-  };
-
-  const originalXhrOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function (method, requestUrl) {
-    if (isTokenPage() && isApiStationManagementRequest(requestUrl)) hasApiStationRequest = true;
-    this.__ktmCaptureNewApiAuth = isTokenPage() && isNewApiManagementRequest(requestUrl);
+    this.__ktmCaptureNewApiAuth = enabled && isTokenPage() && isNewApiManagementRequest(requestUrl);
     return originalXhrOpen.apply(this, arguments);
-  };
+  }
 
-  const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
-  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
-    if (this.__ktmCaptureNewApiAuth) {
+  function patchedSetRequestHeader(name, value) {
+    if (enabled && this.__ktmCaptureNewApiAuth) {
       const headerName = String(name).toLowerCase();
       const headerValue = String(value);
       if (headerName === 'authorization' && /^Bearer\s+/i.test(headerValue)) {
@@ -115,32 +116,67 @@
       }
     }
     return originalSetRequestHeader.apply(this, arguments);
-  };
+  }
 
-  const originalFetch = window.fetch;
-  window.fetch = function (input, init) {
-    const requestUrl = typeof input === 'string' ? input : input && input.url ? input.url : String(input);
-    if (isTokenPage() && isApiStationManagementRequest(requestUrl)) hasApiStationRequest = true;
-    if (isTokenPage() && isNewApiManagementRequest(requestUrl)) {
-      try {
-        const headers = new Headers((init && init.headers) || (input && input.headers) || {});
-        captureNewApiHeaders(headers);
-      } catch {}
+  function patchedFetch(input, init) {
+    if (enabled) {
+      const requestUrl = typeof input === 'string' ? input : input && input.url ? input.url : String(input);
+      if (isTokenPage() && isApiStationManagementRequest(requestUrl)) hasApiStationRequest = true;
+      if (isTokenPage() && isNewApiManagementRequest(requestUrl)) {
+        try {
+          const headers = new Headers((init && init.headers) || (input && input.headers) || {});
+          captureNewApiHeaders(headers);
+        } catch {}
+      }
     }
     return originalFetch.apply(this, arguments);
-  };
+  }
 
-  window.addEventListener('message', async (event) => {
-    const message = event.data;
-    if (
-      event.source !== window ||
-      event.origin !== location.origin ||
-      !message ||
-      message.source !== 'KTM_PAGE_AUTH_REQUEST' ||
-      typeof message.requestId !== 'string'
-    ) return;
-    if (!isTokenPage()) return;
+  function installHooks() {
+    if (hooksInstalled) return;
+    hooksInstalled = true;
+    const clipboard = navigator.clipboard;
+    originalClipboardWriteText = clipboard && clipboard.writeText;
+    if (typeof originalClipboardWriteText === 'function') {
+      try {
+        clipboard.writeText = patchedClipboardWriteText;
+      } catch {}
+    }
 
+    originalXhrOpen = XMLHttpRequest.prototype.open;
+    originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+    originalFetch = window.fetch;
+    XMLHttpRequest.prototype.open = patchedXhrOpen;
+    XMLHttpRequest.prototype.setRequestHeader = patchedSetRequestHeader;
+    window.fetch = patchedFetch;
+    window.addEventListener('copy', onCopy);
+  }
+
+  function removeHooks() {
+    for (const controller of authRequests.values()) controller.abort();
+    authRequests.clear();
+    if (!hooksInstalled) return;
+    hooksInstalled = false;
+    window.removeEventListener('copy', onCopy);
+    if (XMLHttpRequest.prototype.open === patchedXhrOpen) {
+      XMLHttpRequest.prototype.open = originalXhrOpen;
+    }
+    if (XMLHttpRequest.prototype.setRequestHeader === patchedSetRequestHeader) {
+      XMLHttpRequest.prototype.setRequestHeader = originalSetRequestHeader;
+    }
+    if (window.fetch === patchedFetch) window.fetch = originalFetch;
+    const clipboard = navigator.clipboard;
+    if (clipboard && clipboard.writeText === patchedClipboardWriteText) {
+      try {
+        clipboard.writeText = originalClipboardWriteText;
+      } catch {}
+    }
+    newApiAccessToken = '';
+    newApiUserId = '';
+    hasApiStationRequest = false;
+  }
+
+  async function handleAuthRequest(message, signal) {
     const prefix = typeof message.prefix === 'string' ? message.prefix : '';
     if (prefix && (!prefix.startsWith('/') || prefix.startsWith('//') || /[?#]/.test(prefix))) return;
 
@@ -161,6 +197,7 @@
             credentials: 'include',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ refresh_token: refreshToken }),
+            signal,
           });
           let json = null;
           try {
@@ -184,6 +221,7 @@
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
+          signal,
         });
         let json = null;
         try {
@@ -201,11 +239,43 @@
       error = requestError && requestError.message ? requestError.message : '读取站点登录状态失败。';
     }
 
+    if (!enabled || signal.aborted) return;
     window.postMessage({
       source: 'KTM_PAGE_AUTH_RESPONSE',
       requestId: message.requestId,
       data,
       error,
     }, location.origin);
+  }
+
+  window.addEventListener('message', async (event) => {
+    const message = event.data;
+    if (event.source !== window || event.origin !== location.origin || !message) return;
+
+    if (
+      message.source === 'KTM_EXTENSION_CONTENT' &&
+      message.type === 'KTM_SET_ENABLED' &&
+      typeof message.enabled === 'boolean'
+    ) {
+      enabled = message.enabled;
+      if (enabled) installHooks();
+      else removeHooks();
+      return;
+    }
+
+    if (
+      !enabled ||
+      !isTokenPage() ||
+      message.source !== 'KTM_PAGE_AUTH_REQUEST' ||
+      typeof message.requestId !== 'string'
+    ) return;
+
+    const controller = new AbortController();
+    authRequests.set(message.requestId, controller);
+    try {
+      await handleAuthRequest(message, controller.signal);
+    } finally {
+      authRequests.delete(message.requestId);
+    }
   });
 })();

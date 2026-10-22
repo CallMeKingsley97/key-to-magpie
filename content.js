@@ -22,6 +22,7 @@
 
   const ROOT_ID = 'ktm-root';
   const PREF_PREFIX = 'ktm:pref:';
+  const SITE_ENABLED_PREFIX = 'ktm:site-enabled:';
   const PAGE_SIZE = 100;
   const MAX_TOKENS = 1000;
   const FETCH_TIMEOUT = 15000;
@@ -43,6 +44,8 @@
   // ---------------------------------------------------------------------------
 
   const state = {
+    enabled: true,
+    featureController: new AbortController(),
     /** @type {null | ReturnType<typeof makeContext>} */
     ctx: null,
     /** @type {Token[]} */
@@ -227,6 +230,10 @@
     });
   }
 
+  function siteEnabledKey() {
+    return SITE_ENABLED_PREFIX + location.origin;
+  }
+
   async function clipboardWrite(text) {
     try {
       await navigator.clipboard.writeText(text);
@@ -253,6 +260,7 @@
   }
 
   function toast(text, kind = 'info') {
+    if (!state.enabled) return;
     ensureHost();
     state.shadow.querySelectorAll('.ktm-toast').forEach((el) => el.remove());
     const el = h('div', {
@@ -289,11 +297,11 @@
   }
 
   function requestMagpieImportAfterCopy() {
-    if (state.copyPromptOpen) return;
+    if (!state.enabled || state.copyPromptOpen) return;
     state.copyPromptTrigger =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setTimeout(() => {
-      if (!isTokenPage() || state.copyPromptOpen) {
+      if (!state.enabled || !isTokenPage() || state.copyPromptOpen) {
         if (!isTokenPage()) state.copyPromptTrigger = null;
         return;
       }
@@ -428,6 +436,10 @@
   }
 
   function injectUi() {
+    if (!state.enabled) {
+      document.querySelectorAll('[data-ktm="toolbar"], [data-ktm="floating"]').forEach((el) => el.remove());
+      return;
+    }
     if (!isTokenPage()) {
       document.querySelectorAll('[data-ktm="toolbar"], [data-ktm="floating"]').forEach((el) => el.remove());
       return;
@@ -770,7 +782,7 @@
   async function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeout);
-    const upstreamSignal = options.signal;
+    const upstreamSignal = options.signal || state.featureController.signal;
     const abortFromUpstream = () => controller.abort();
     if (upstreamSignal) {
       if (upstreamSignal.aborted) controller.abort();
@@ -791,9 +803,11 @@
    */
   async function fetchWithRetry(url, options = {}, timeout = FETCH_TIMEOUT) {
     let lastError = null;
+    const signal = options.signal || state.featureController.signal;
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (signal.aborted) throw signal.reason || new Error('插件功能已关闭。');
       try {
-        const response = await fetchWithTimeout(url, options, timeout);
+        const response = await fetchWithTimeout(url, { ...options, signal }, timeout);
         if ((response.status >= 500 || response.status === 429) && attempt < 2) {
           lastError = new Error(`HTTP ${response.status}`);
           await sleep(attempt === 0 ? 500 : 1200);
@@ -801,6 +815,7 @@
         }
         return response;
       } catch (error) {
+        if (signal.aborted) throw error;
         lastError = error;
         if (attempt < 2) await sleep(attempt === 0 ? 500 : 1200);
       }
@@ -816,13 +831,14 @@
     }
   }
 
-  async function detectContext() {
+  async function detectContext(signal = state.featureController.signal) {
     const prefixes = pathPrefixes();
 
     // 公开接口：不登录也能判断是 new-api 还是 sub2api，并拿到站点名。
     for (const prefix of prefixes) {
+      if (signal.aborted) throw signal.reason || new Error('插件功能已关闭。');
       try {
-        const sub = await fetchWithTimeout(prefix + '/api/v1/settings/public', {}, 7000);
+        const sub = await fetchWithTimeout(prefix + '/api/v1/settings/public', { signal }, 7000);
         if (sub.ok) {
           const json = await safeJson(sub);
           const data = json && json.data;
@@ -833,9 +849,10 @@
       } catch {
         /* try next */
       }
+      if (signal.aborted) throw signal.reason || new Error('插件功能已关闭。');
 
       try {
-        const nw = await fetchWithTimeout(prefix + '/api/status', {}, 7000);
+        const nw = await fetchWithTimeout(prefix + '/api/status', { signal }, 7000);
         if (nw.ok) {
           const json = await safeJson(nw);
           const data = json && json.data;
@@ -847,6 +864,7 @@
         /* try next */
       }
     }
+    if (signal.aborted) throw signal.reason || new Error('插件功能已关闭。');
 
     // 公开接口被挡时，用页面自身的特征兜底。
     // __APP_CONFIG__ 是 sub2api 前端注入的公开设置副本，字段与接口一致。
@@ -870,6 +888,7 @@
       try {
         const r = await fetchWithTimeout('/api/v1/keys?page=1&page_size=1', {
           headers: { Authorization: 'Bearer ' + subToken },
+          signal,
         });
         if (r.ok || r.status === 401 || r.status === 403) {
           return makeContext('sub2api', '', document.title);
@@ -878,9 +897,10 @@
         /* ignore */
       }
     }
+    if (signal.aborted) throw signal.reason || new Error('插件功能已关闭。');
 
     try {
-      const r = await fetchWithTimeout('/api/token/?p=1&size=1');
+      const r = await fetchWithTimeout('/api/token/?p=1&size=1', { signal });
       if (r.ok || r.status === 401 || r.status === 403) {
         return makeContext('newapi', '', document.title);
       }
@@ -1254,20 +1274,20 @@
    * 的模型，比分组配置本身更准确。并发数限制得比较低，避免给站点压力。
    * 任何失败都只是让这个 key 的模型列表留空，由 magpie 导入后自行获取。
    */
-  async function fillSub2ApiModels(tokens, keys) {
+  async function fillSub2ApiModels(tokens, keys, signal) {
     const targets = tokens.filter((token) => keys.has(token.id) && !token.models.length);
     if (!targets.length) return;
 
     const CONCURRENCY = 4;
     let cursor = 0;
     const worker = async () => {
-      while (cursor < targets.length) {
+      while (cursor < targets.length && !signal?.aborted) {
         const token = targets[cursor];
         cursor += 1;
         try {
           const res = await fetchWithTimeout(
             state.ctx.openaiBase + '/models',
-            { headers: { Authorization: 'Bearer ' + keys.get(token.id) } },
+            { headers: { Authorization: 'Bearer ' + keys.get(token.id) }, signal },
             8000
           );
           if (!res.ok) continue;
@@ -1289,6 +1309,7 @@
   async function resolveKeys(tokens, fetchModels = true, signal = null) {
     const map = new Map();
     const failures = [];
+    const requestSignal = signal || state.featureController.signal;
 
     if (state.ctx.kind === 'sub2api') {
       for (const token of tokens) {
@@ -1301,7 +1322,7 @@
       // sub2api 的模型限制挂在分组上，列表接口不返回，所以这里用明文 key
       // 调一次 /v1/models：该接口按 key 所属分组的 allowlist 过滤，结果就是
       // 这个 key 实际能用的模型。失败不影响导入，留空让 magpie 自己获取。
-      if (fetchModels) await fillSub2ApiModels(tokens, map);
+      if (fetchModels) await fillSub2ApiModels(tokens, map, requestSignal);
       return { map, failures };
     }
 
@@ -1312,7 +1333,7 @@
         state.ctx,
         state.ctx.prefix + '/api/token/batch/keys',
         { ids: missing },
-        { signal }
+        { signal: requestSignal }
       );
       if (res.ok) {
         const json = await safeJson(res);
@@ -1339,10 +1360,10 @@
     } catch {
       /* 批量接口不可用时逐个读取 */
     }
-    if (signal?.aborted) return { map, failures };
+    if (requestSignal.aborted) return { map, failures };
 
     for (const token of tokens) {
-      if (signal?.aborted) break;
+      if (requestSignal.aborted) break;
       if (map.has(token.id)) continue;
       if (state.keyCache.has(token.id)) {
         map.set(token.id, state.keyCache.get(token.id));
@@ -1352,9 +1373,9 @@
       // 单个 key 读取失败时重试两次（网络错误或 5xx）。
       let ok = false;
       for (let attempt = 0; attempt < 3 && !ok; attempt += 1) {
-        if (signal?.aborted) break;
+        if (requestSignal.aborted) break;
         try {
-          const res = await newApiPost(state.ctx, url, {}, { signal });
+          const res = await newApiPost(state.ctx, url, {}, { signal: requestSignal });
           const json = await safeJson(res);
           const key = res.ok && json && json.data && json.data.key;
           if (typeof key === 'string' && key.trim()) {
@@ -1585,6 +1606,7 @@
   }, 400);
 
   async function openDialog() {
+    if (!state.enabled) return;
     if (!isTokenPage()) {
       toast('请在令牌管理页使用这个功能。');
       return;
@@ -1593,6 +1615,7 @@
     if (state.dialogOpen && !state.error) return;
 
     cancelEndpointProbe();
+    const requestSignal = state.featureController.signal;
     state.dialogOpen = true;
     state.loading = true;
     state.busy = false;
@@ -1612,20 +1635,24 @@
     renderAll();
 
     try {
-      const ctx = await detectContext();
+      const ctx = await detectContext(requestSignal);
+      if (!state.enabled || requestSignal.aborted) return;
       state.ctx = ctx;
       const tokens = await loadTokens(ctx);
+      if (!state.enabled || requestSignal.aborted) return;
       state.tokens = tokens.sort((a, b) => {
         if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
         return a.name.localeCompare(b.name, 'zh-Hans-CN');
       });
       await loadPrefs(ctx);
     } catch (error) {
+      if (!state.enabled || requestSignal.aborted) return;
       const message = error && error.message ? error.message : String(error);
       state.error = /abort|timeout|failed to fetch|network/i.test(message)
         ? '无法连接当前站点，请检查网络后重试。'
         : message;
     } finally {
+      if (state.featureController.signal !== requestSignal) return;
       state.loading = false;
       if (!state.dialogOpen) return;
       renderAll();
@@ -2181,8 +2208,9 @@
   }
 
   async function doImport() {
-    if (state.busy || !state.ctx) return;
+    if (!state.enabled || state.busy || !state.ctx) return;
     cancelEndpointProbe();
+    const requestSignal = state.featureController.signal;
     const selected = state.tokens.filter((token) => state.selected.has(token.id));
     if (!selected.length) return;
 
@@ -2200,7 +2228,8 @@
     renderAll();
 
     try {
-      const { map, failures } = await resolveKeys(selected);
+      const { map, failures } = await resolveKeys(selected, true, requestSignal);
+      if (!state.enabled || requestSignal.aborted) return;
       const usable = selected.filter((token) => map.has(token.id));
       if (!usable.length) {
         throw new Error('没有获取到完整的 API Key，请刷新页面后重试。');
@@ -2233,6 +2262,7 @@
         await openQueueItem();
       }
     } catch (error) {
+      if (!state.enabled || requestSignal.aborted) return;
       state.busy = false;
       state.error = error && error.message ? error.message : String(error);
       renderAll();
@@ -2265,6 +2295,7 @@
     state.queue = [];
     state.queueIndex = 0;
     state.queueDone = false;
+    state.busy = false;
     finishImportTab();
     renderAll();
   }
@@ -2366,7 +2397,7 @@
   // ---------------------------------------------------------------------------
 
   async function openBatch() {
-    if (state.busy) return;
+    if (!state.enabled || state.busy) return;
 
     if (!state.queue.length) {
       // 没有队列时直接用当前选中项生成命令，不必先走一遍导入。
@@ -2386,8 +2417,10 @@
 
       state.busy = true;
       updateFooter();
+      const requestSignal = state.featureController.signal;
       try {
-        const { map, failures } = await resolveKeys(selected);
+        const { map, failures } = await resolveKeys(selected, true, requestSignal);
+        if (!state.enabled || requestSignal.aborted) return;
         const usable = selected.filter((token) => map.has(token.id));
         if (!usable.length) {
           throw new Error('没有获取到完整的 API Key，请刷新页面后重试。');
@@ -2403,11 +2436,14 @@
           toast(`${failures.length} 个 Key 获取失败，未包含在命令中。`, 'warn');
         }
       } catch (error) {
+        if (!state.enabled || requestSignal.aborted) return;
         toast(error && error.message ? error.message : String(error), 'error');
         return;
       } finally {
-        state.busy = false;
-        updateFooter();
+        if (state.featureController.signal === requestSignal) {
+          state.busy = false;
+          updateFooter();
+        }
       }
     } else {
       state.batchText = batchCommands(state.queue);
@@ -2794,73 +2830,144 @@
   // ---------------------------------------------------------------------------
 
   let started = false;
+  let observer = null;
+  let injectInterval = null;
+  let locationInterval = null;
+  let enabledPreferenceChanged = false;
+  let lastHref = location.href;
+
+  function setPageAuthEnabled(enabled) {
+    window.postMessage({
+      source: 'KTM_EXTENSION_CONTENT',
+      type: 'KTM_SET_ENABLED',
+      enabled,
+    }, location.origin);
+  }
+
+  function stopOnTokenPage() {
+    observer?.disconnect();
+    if (injectInterval) clearInterval(injectInterval);
+    if (locationInterval) clearInterval(locationInterval);
+    injectInterval = null;
+    locationInterval = null;
+    document.querySelectorAll('[data-ktm="toolbar"], [data-ktm="floating"]').forEach((el) => el.remove());
+  }
+
+  function checkLocationChange() {
+    if (location.href === lastHref) return;
+    lastHref = location.href;
+    setPageAuthEnabled(state.enabled && isTokenPage());
+    const copyPromptWasOpen = state.copyPromptOpen;
+    state.copyPromptOpen = false;
+    state.copyPromptTrigger = null;
+    if (state.dialogOpen) closeDialog();
+    else if (copyPromptWasOpen) renderAll();
+    if (state.enabled && isTokenPage()) startOnTokenPage();
+    if (state.enabled && started) scheduleInject();
+  }
+
+  function startLocationMonitor() {
+    if (!locationInterval) locationInterval = setInterval(checkLocationChange, 1200);
+  }
+
+  function setFeatureEnabled(enabled, force = false) {
+    const nextEnabled = enabled !== false;
+    const changed = state.enabled !== nextEnabled;
+    state.enabled = nextEnabled;
+    setPageAuthEnabled(nextEnabled && isTokenPage());
+    if (!changed && !force) return;
+
+    if (nextEnabled) {
+      state.featureController = new AbortController();
+      startLocationMonitor();
+      if (isTokenPage()) startOnTokenPage();
+      return;
+    }
+
+    state.featureController.abort();
+    cancelEndpointProbe();
+    state.queue = [];
+    state.queueIndex = 0;
+    state.queueDone = false;
+    state.batchOpen = false;
+    state.batchText = '';
+    state.copyPromptOpen = false;
+    state.copyPromptTrigger = null;
+    if (state.dialogOpen) closeDialog();
+    else {
+      state.tokens = [];
+      state.selected.clear();
+      state.keyCache.clear();
+      state.newApiToken = '';
+    }
+    stopOnTokenPage();
+    state.host?.remove();
+    state.host = null;
+    state.shadow = null;
+  }
 
   function startOnTokenPage() {
-    if (started) return;
-    started = true;
+    if (!state.enabled || !isTokenPage()) return;
+    setPageAuthEnabled(true);
+    if (!started) {
+      started = true;
 
-    document.addEventListener(
-      'keydown',
-      (event) => {
-        if (event.key !== 'Escape') return;
-        if (state.batchOpen) {
-          state.batchOpen = false;
-          renderAll();
-        } else if (state.dialogOpen) {
-          closeDialog();
-        }
-      },
-      true
-    );
+      document.addEventListener(
+        'keydown',
+        (event) => {
+          if (!state.enabled || event.key !== 'Escape') return;
+          if (state.batchOpen) {
+            state.batchOpen = false;
+            renderAll();
+          } else if (state.dialogOpen) {
+            closeDialog();
+          }
+        },
+        true
+      );
 
-    document.addEventListener(
-      'keydown',
-      (event) => {
-        if (event.key !== 'Tab' || !state.dialogOpen) return;
-        const focusables = Array.from(
-          state.shadow.querySelectorAll(
-            'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], summary'
-          )
-        ).filter((el) => el.offsetParent !== null || el.getClientRects().length > 0);
-        if (!focusables.length) return;
-        const first = focusables[0];
-        const last = focusables[focusables.length - 1];
-        const active = state.shadow.activeElement;
-        if (event.shiftKey && active === first) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && active === last) {
-          event.preventDefault();
-          first.focus();
-        }
-      },
-      true
-    );
+      document.addEventListener(
+        'keydown',
+        (event) => {
+          if (!state.enabled || event.key !== 'Tab' || !state.dialogOpen) return;
+          const focusables = Array.from(
+            state.shadow.querySelectorAll(
+              'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), a[href], summary'
+            )
+          ).filter((el) => el.offsetParent !== null || el.getClientRects().length > 0);
+          if (!focusables.length) return;
+          const first = focusables[0];
+          const last = focusables[focusables.length - 1];
+          const active = state.shadow.activeElement;
+          if (event.shiftKey && active === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && active === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        },
+        true
+      );
 
-    window.addEventListener('message', (event) => {
-      const message = event.data;
-      if (
-        event.source !== window ||
-        event.origin !== location.origin ||
-        !message ||
-        message.source !== 'KTM_PAGE_AUTH' ||
-        message.type !== 'API_KEY_COPIED' ||
-        !isTokenPage()
-      ) return;
-      requestMagpieImportAfterCopy();
-    });
+      window.addEventListener('message', (event) => {
+        const message = event.data;
+        if (
+          !state.enabled ||
+          event.source !== window ||
+          event.origin !== location.origin ||
+          !message ||
+          message.source !== 'KTM_PAGE_AUTH' ||
+          message.type !== 'API_KEY_COPIED' ||
+          !isTokenPage()
+        ) return;
+        requestMagpieImportAfterCopy();
+      });
+    }
 
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      if (message && message.type === 'KTM_OPEN_PANEL') {
-        openDialog();
-        sendResponse({ ok: true });
-      }
-      return false;
-    });
-
-    const observer = new MutationObserver(() => scheduleInject());
+    if (!observer) observer = new MutationObserver(() => scheduleInject());
     const startObserving = () => {
-      if (!document.body) return;
+      if (!state.enabled || !document.body || !observer) return;
       observer.observe(document.body, { childList: true, subtree: true });
       scheduleInject();
     };
@@ -2870,22 +2977,45 @@
     } else {
       startObserving();
     }
-
-    setInterval(injectUi, 2500);
+    if (!injectInterval) injectInterval = setInterval(injectUi, 2500);
   }
 
-  let lastHref = location.href;
-  if (isTokenPage()) startOnTokenPage();
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || sender.id !== chrome.runtime.id) return false;
+    if (message.type === 'KTM_GET_STATUS') {
+      sendResponse({ ok: true, enabled: state.enabled, supported: isTokenPage() });
+      return false;
+    }
+    if (message.type === 'KTM_SET_ENABLED') {
+      if (message.origin !== location.origin || typeof message.enabled !== 'boolean') return false;
+      enabledPreferenceChanged = true;
+      setFeatureEnabled(message.enabled, true);
+      sendResponse({ ok: true, enabled: state.enabled });
+      return false;
+    }
+    if (message.type === 'KTM_OPEN_PANEL') {
+      if (!state.enabled) {
+        sendResponse({ ok: false, error: '当前站点已关闭插件功能。' });
+      } else if (!isTokenPage()) {
+        sendResponse({ ok: false, error: '请先打开中转站的令牌管理页。' });
+      } else {
+        openDialog();
+        sendResponse({ ok: true });
+      }
+      return false;
+    }
+    return false;
+  });
 
-  setInterval(() => {
-    if (location.href === lastHref) return;
-    lastHref = location.href;
-    const copyPromptWasOpen = state.copyPromptOpen;
-    state.copyPromptOpen = false;
-    state.copyPromptTrigger = null;
-    if (state.dialogOpen) closeDialog();
-    else if (copyPromptWasOpen) renderAll();
-    if (isTokenPage()) startOnTokenPage();
-    if (started) scheduleInject();
-  }, 1200);
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !changes[siteEnabledKey()]) return;
+    enabledPreferenceChanged = true;
+    setFeatureEnabled(changes[siteEnabledKey()].newValue !== false, true);
+  });
+
+  (async () => {
+    const key = siteEnabledKey();
+    const stored = await storageGet(key);
+    if (!enabledPreferenceChanged) setFeatureEnabled(stored[key] !== false, true);
+  })();
 })();

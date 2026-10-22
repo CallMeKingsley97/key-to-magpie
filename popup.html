@@ -54,6 +54,12 @@
     button:hover { filter: brightness(1.06); }
     button:active { transform: scale(.985); }
     button:disabled { opacity: .55; cursor: default; }
+    button.secondary {
+      margin-bottom: 8px;
+      color: var(--fg);
+      background: transparent;
+      border: 1px solid var(--line);
+    }
     .hint {
       margin-top: 10px;
       padding: 9px 11px;
@@ -74,13 +80,13 @@
     <h1>Key to Magpie</h1>
   </header>
   <main>
-    <p>把 new-api / sub2api 令牌管理页里的 API Key 一键导入 magpie。</p>
+    <p id="site-state">正在读取当前站点状态…</p>
+    <button id="toggle" class="secondary" type="button" disabled>读取中…</button>
     <button id="open" type="button">打开导入面板</button>
-    <div class="status" id="status"></div>
+    <div class="status" id="status" role="status" aria-live="polite"></div>
     <div class="hint">
-      <b>使用方法</b>：打开中转站的令牌管理页（如 <code>/token</code>、<code>/keys</code>），
-      页面上会出现「导入到 magpie」按钮；此处点击同样可以唤起。
-      导入链接由本机 magpie 应用确认后才会写入。
+      <b>站点开关</b>：关闭后会在当前网站停用扩展功能，刷新页面后仍保持关闭；
+      可随时在这里重新开启。导入链接由本机 magpie 应用确认后才会写入。
     </div>
   </main>
   <script src="popup.js"></script>
