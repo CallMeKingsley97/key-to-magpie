@@ -16,7 +16,7 @@ A Chrome and Microsoft Edge (Chromium 111+) extension that adds an "Import to ma
 1. Open the token management page of your relay station:
    - new-api: `/token` (e.g. `https://your-station.com/token`)
    - sub2api: `/keys`
-2. An **"Import to magpie"** button will appear next to the "Create Token / Add API Key" button on the page (shown at the bottom-right if no create button is found)
+2. An **"Import to magpie"** button will appear next to the "Create Token / Add API Key" button on the page (shown at the bottom-right if no create button is found; drag it to reposition, with its position saved per site)
 3. Click the button and a panel will pop up listing all your keys (name, status, group, model count, masked key)
 4. Check the keys you want to import (single, multiple, or select all), then click "Import"
    - Single key: the magpie confirmation window pops up directly

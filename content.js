@@ -23,6 +23,7 @@
   const ROOT_ID = 'ktm-root';
   const PREF_PREFIX = 'ktm:pref:';
   const SITE_ENABLED_PREFIX = 'ktm:site-enabled:';
+  const FLOATING_POSITION_PREFIX = 'ktm:floating-position:';
   const PAGE_SIZE = 100;
   const MAX_TOKENS = 1000;
   const FETCH_TIMEOUT = 15000;
@@ -427,6 +428,7 @@
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.dataset.ktm = 'floating';
+    btn.title = '点击导入；拖动或使用方向键移动按钮';
     btn.append(makeMagpieIcon(20), h('span', { text: '导入到 magpie' }));
     btn.style.cssText = [
       'all:unset',
@@ -441,28 +443,181 @@
       'height:42px',
       'padding:0 18px',
       'border-radius:999px',
-      'cursor:pointer',
       'font:600 14px/1 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif',
       'color:#fff',
       'background:linear-gradient(135deg,#7c3aed,#ec4899)',
       'box-shadow:0 12px 34px rgba(124,58,237,.4)',
       'transition:transform .12s ease,filter .12s ease',
       'white-space:nowrap',
+      '-webkit-user-select:none',
       'user-select:none',
+      'touch-action:none',
+      'cursor:grab',
     ].join(';');
+
+    let pointerId = null;
+    let pointerStartX = 0;
+    let pointerStartY = 0;
+    let grabOffsetX = 0;
+    let grabOffsetY = 0;
+    let dragging = false;
+    let suppressClick = false;
+    let positionChanged = false;
+
+    const moveTo = (left, top) => {
+      const maxLeft = Math.max(0, window.innerWidth - btn.offsetWidth - 12);
+      const maxTop = Math.max(0, window.innerHeight - btn.offsetHeight - 12);
+      const minLeft = Math.min(12, maxLeft);
+      const minTop = Math.min(12, maxTop);
+      const x = Math.max(minLeft, Math.min(left, maxLeft));
+      const y = Math.max(minTop, Math.min(top, maxTop));
+      btn.style.left = `${x}px`;
+      btn.style.top = `${y}px`;
+      btn.style.right = 'auto';
+      btn.style.bottom = 'auto';
+    };
+
+    const savePosition = () => {
+      if (!extensionContextIsUsable() || !btn.isConnected) return;
+      const rect = btn.getBoundingClientRect();
+      storageSet({
+        [FLOATING_POSITION_PREFIX + location.origin]: { x: rect.left, y: rect.top },
+      });
+    };
+
+    const restorePosition = async () => {
+      const key = FLOATING_POSITION_PREFIX + location.origin;
+      const stored = await storageGet(key);
+      if (!extensionContextIsUsable()) return;
+      const position = stored[key];
+      if (
+        !positionChanged &&
+        state.enabled &&
+        !state.contextInvalidated &&
+        btn.isConnected &&
+        position &&
+        Number.isFinite(position.x) &&
+        Number.isFinite(position.y)
+      ) {
+        moveTo(position.x, position.y);
+      }
+    };
+
+    const clampCurrentPosition = () => {
+      if (!btn.isConnected) return;
+      const rect = btn.getBoundingClientRect();
+      moveTo(rect.left, rect.top);
+    };
+
     btn.addEventListener('mouseenter', () => {
-      btn.style.transform = 'translateY(-2px)';
-      btn.style.filter = 'brightness(1.06)';
+      if (!dragging) {
+        btn.style.transform = 'translateY(-2px)';
+        btn.style.filter = 'brightness(1.06)';
+      }
     });
     btn.addEventListener('mouseleave', () => {
+      if (!dragging) {
+        btn.style.transform = '';
+        btn.style.filter = '';
+      }
+    });
+    btn.addEventListener('pointerdown', (event) => {
+      if (!event.isPrimary || event.button !== 0 || !state.enabled) return;
+      const rect = btn.getBoundingClientRect();
+      pointerId = event.pointerId;
+      pointerStartX = event.clientX;
+      pointerStartY = event.clientY;
+      grabOffsetX = event.clientX - rect.left;
+      grabOffsetY = event.clientY - rect.top;
+      try {
+        btn.setPointerCapture(pointerId);
+      } catch {
+        pointerId = null;
+      }
+    });
+    btn.addEventListener('pointermove', (event) => {
+      if (pointerId !== event.pointerId) return;
+      if (
+        !dragging &&
+        Math.hypot(event.clientX - pointerStartX, event.clientY - pointerStartY) < 4
+      ) return;
+      dragging = true;
+      positionChanged = true;
+      btn.classList.add('dragging');
+      btn.style.cursor = 'grabbing';
+      btn.style.transform = 'none';
+      moveTo(event.clientX - grabOffsetX, event.clientY - grabOffsetY);
+      event.preventDefault();
+    });
+    btn.addEventListener('pointerup', (event) => {
+      if (pointerId !== event.pointerId) return;
+      pointerId = null;
+      if (dragging) {
+        suppressClick = true;
+        savePosition();
+        setTimeout(() => { suppressClick = false; }, 0);
+      }
+      dragging = false;
+      btn.classList.remove('dragging');
+      btn.style.cursor = 'grab';
+      btn.style.filter = '';
+    });
+    btn.addEventListener('pointercancel', () => {
+      if (dragging) savePosition();
+      pointerId = null;
+      dragging = false;
+      btn.classList.remove('dragging');
+      btn.style.cursor = 'grab';
       btn.style.transform = '';
       btn.style.filter = '';
     });
+    btn.addEventListener('lostpointercapture', () => {
+      if (pointerId === null) return;
+      if (dragging) {
+        suppressClick = true;
+        savePosition();
+        setTimeout(() => { suppressClick = false; }, 0);
+      }
+      pointerId = null;
+      dragging = false;
+      btn.classList.remove('dragging');
+      btn.style.cursor = 'grab';
+      btn.style.transform = '';
+      btn.style.filter = '';
+    });
+    btn.addEventListener('keydown', (event) => {
+      const directions = {
+        ArrowUp: [0, -15],
+        ArrowDown: [0, 15],
+        ArrowLeft: [-15, 0],
+        ArrowRight: [15, 0],
+      };
+      const direction = directions[event.key];
+      if (!direction) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = btn.getBoundingClientRect();
+      moveTo(rect.left + direction[0], rect.top + direction[1]);
+      positionChanged = true;
+      savePosition();
+    });
     btn.addEventListener('click', (event) => {
+      if (suppressClick) {
+        event.preventDefault();
+        event.stopPropagation();
+        suppressClick = false;
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       openDialog();
     });
+    window.addEventListener('resize', clampCurrentPosition);
+    const resizeObserver = new ResizeObserver(clampCurrentPosition);
+    resizeObserver.observe(btn);
+    btn.__ktmResizeHandler = clampCurrentPosition;
+    btn.__ktmResizeObserver = resizeObserver;
+    restorePosition();
     return btn;
   }
 
@@ -477,18 +632,24 @@
   }
 
   function removeFloatingButton() {
-    document.querySelectorAll('[data-ktm="floating"]').forEach((el) => el.remove());
+    document.querySelectorAll('[data-ktm="floating"]').forEach((el) => {
+      if (el.__ktmResizeHandler) window.removeEventListener('resize', el.__ktmResizeHandler);
+      el.__ktmResizeObserver?.disconnect();
+      el.remove();
+    });
   }
 
   function injectUi() {
     if (state.contextInvalidated) return;
     if (!extensionContextIsUsable()) return;
     if (!state.enabled) {
-      document.querySelectorAll('[data-ktm="toolbar"], [data-ktm="floating"]').forEach((el) => el.remove());
+      document.querySelectorAll('[data-ktm="toolbar"]').forEach((el) => el.remove());
+      removeFloatingButton();
       return;
     }
     if (!isTokenPage()) {
-      document.querySelectorAll('[data-ktm="toolbar"], [data-ktm="floating"]').forEach((el) => el.remove());
+      document.querySelectorAll('[data-ktm="toolbar"]').forEach((el) => el.remove());
+      removeFloatingButton();
       return;
     }
 
@@ -2930,7 +3091,8 @@
     if (locationInterval) clearInterval(locationInterval);
     injectInterval = null;
     locationInterval = null;
-    document.querySelectorAll('[data-ktm="toolbar"], [data-ktm="floating"]').forEach((el) => el.remove());
+    document.querySelectorAll('[data-ktm="toolbar"]').forEach((el) => el.remove());
+    removeFloatingButton();
   }
 
   function checkLocationChange() {
